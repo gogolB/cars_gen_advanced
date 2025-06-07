@@ -1,13 +1,12 @@
 # configs/training/scratch_default_training.yaml
 
 # --- Custom Hyperparameters for the LightningModule ---
-# These values are used by our StyleGAN2 module, not by the Trainer itself.
 total_kimg: 25000
 kimg_per_tick: 4
 snapshot_ticks: 10
 nimg_snapshot: 16
-g_lr: 0.0025
-d_lr: 0.0025
+g_lr: 0.00025
+d_lr: 0.00025
 adam_betas: [0.0, 0.99]
 adam_eps: 1.0e-8
 r1_gamma: 5.0
@@ -18,18 +17,18 @@ pl_decay: 0.01
 ema_kimg: 10.0
 ema_rampup_ratio: 0.05
 ema_beta: 0.999
+# CORRECTED: Moved gradient_clip_val here for manual use in the LightningModule.
+gradient_clip_val: 1.0 
 ada_kwargs:
   target_rt: 0.6
   interval_kimg: 4
   speed_kimg: 500
 
 # --- PyTorch Lightning Trainer Parameters ---
-# This section now correctly defines the object to be instantiated.
 trainer:
-  # CORRECTED: Added the mandatory _target_ key for Hydra instantiation.
   _target_: pytorch_lightning.Trainer
   accelerator: auto
   devices: auto
   log_every_n_steps: 2
-  # max_steps is calculated dynamically in the train script.
+  # REMOVED: gradient_clip_val is not supported with manual optimization.
 
