@@ -8,7 +8,6 @@ seed: 42
 project_root: "." # Using Hydra's variable for project root is a good practice.
 tags: ["stylegan2_scratch", "cars_thyroid", "initial_from_scratch_run"]
 notes: "Initial from-scratch StyleGAN2 implementation for CARS thyroid dataset."
-outputs_dir: outputs
 
 # --- Default Configurations ---
 defaults:
@@ -16,17 +15,29 @@ defaults:
   - model: stylegan2_scratch_256.yaml
   - training: scratch_default_training.yaml
   - evaluation: default_evaluation.yaml
-  # CORRECTED: Reverted to the standard 'default' logger which is always available.
+  # Re-enabled colorlog now that the dependency is installed.
   - override hydra/job_logging: colorlog
   - override hydra/hydra_logging: colorlog
 
 # --- PyTorch Lightning Logger Configuration ---
 # This configuration tells the logger to save its files directly into the
-# output directory that Hydra creates, preventing nested folders.
-training: # This allows overriding or extending the training config from cvae_trainer_for_ldm.yaml
-  logger:
-    _target_: pytorch_lightning.loggers.TensorBoardLogger
-    save_dir: "${hydra:runtime.output_dir}/tb_logs" # Save TB logs within the Hydra run directory
-    name: "${model.model_name}" # Group logs by model name
-    version: "" # No specific version subdirectory, logs directly under model_name
+# output directory that Hydra creates, preventing any ambiguity.
+logger:
+  _target_: pytorch_lightning.loggers.TensorBoardLogger
+  # CORRECTED: Explicitly set the save_dir to the CWD, which Hydra controls.
+  save_dir: "."
+  # An empty name/version prevents the logger from creating extra subdirectories.
+  name: ""
+  version: ""
+  # The final log path will be the one defined by hydra.run.dir.
+
+# --- Hydra Configuration ---
+# This section has the sole responsibility for defining the output path.
+hydra:
+  run:
+    # This sets the output directory for the entire run. The script's CWD will be this path.
+    dir: ${project_root}/outputs/${project_name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${project_root}/outputs/${project_name}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
 
