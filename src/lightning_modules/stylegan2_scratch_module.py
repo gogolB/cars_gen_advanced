@@ -31,10 +31,29 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
 
         # --- Network Initialization ---
         print("Initializing From-Scratch Generator...")
-        self.G = Generator(**self.hparams.model_cfg)
+        # CORRECTED: Instantiate Generator with an explicit list of arguments
+        # from the model config to prevent TypeErrors. This is the definitive fix.
+        self.G = Generator(
+            z_dim=self.hparams.model_cfg.z_dim,
+            w_dim=self.hparams.model_cfg.w_dim,
+            num_mapping_layers=self.hparams.model_cfg.num_mapping_layers,
+            mapping_lr_mul=self.hparams.model_cfg.mapping_lr_mul,
+            img_resolution=self.hparams.model_cfg.img_resolution,
+            img_channels=self.hparams.model_cfg.img_channels,
+            channel_base=self.hparams.model_cfg.channel_base,
+            channel_max=self.hparams.model_cfg.channel_max
+        )
         
         print("Initializing From-Scratch Discriminator...")
-        self.D = Discriminator(**self.hparams.model_cfg)
+        # CORRECTED: Instantiate Discriminator with an explicit list of arguments
+        # from the model config to prevent TypeErrors. This is the definitive fix.
+        self.D = Discriminator(
+            img_resolution=self.hparams.model_cfg.img_resolution,
+            img_channels=self.hparams.model_cfg.img_channels,
+            channel_base=self.hparams.model_cfg.channel_base,
+            channel_max=self.hparams.model_cfg.channel_max,
+            mbstd_group_size=self.hparams.model_cfg.mbstd_group_size
+        )
 
         print("Initializing G_ema...")
         self.G_ema = copy.deepcopy(self.G).eval()
@@ -115,7 +134,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         d_loss = compute_d_loss_logistic(d_real_logits, d_fake_logits)
         self.log('d_loss/main', d_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
         
-        # CORRECTED: Use batch_idx for reliable periodic execution instead of global_step.
         if self.r1_gamma > 0 and (batch_idx % self.d_reg_interval == 0):
             real_images_for_r1 = real_images_aug.detach().requires_grad_(True)
             d_real_logits_r1 = self.D(real_images_for_r1)
@@ -138,7 +156,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
         self.log('g_loss/main', g_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
         
-        # CORRECTED: Use batch_idx for reliable periodic execution instead of global_step.
         if self.pl_weight > 0 and (batch_idx % self.g_reg_interval == 0):
             pl_z = torch.randn(current_batch_size // 2, self.G.z_dim, device=self.device)
             ws_pl_single = self.G.mapping(pl_z)
@@ -167,7 +184,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
             ema_nimg = ema_kimg * 1000
             beta = 0.5 ** ((current_batch_size * world_size) / max(ema_nimg, 1e-8))
-            for p_ema, p_main in zip(self.G_ema.parameters(), self.G.parameters()):
+            for p_ema, p_main in zip(self.G.parameters(), self.G.parameters()):
                 p_ema.copy_(p_main.lerp(p_ema, beta))
             for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
                 b_ema.copy_(b_main)

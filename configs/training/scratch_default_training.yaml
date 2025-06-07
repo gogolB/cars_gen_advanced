@@ -3,10 +3,14 @@
 # --- Custom Hyperparameters for the LightningModule ---
 total_kimg: 25000
 kimg_per_tick: 4
-snapshot_ticks: 10
+snapshot_ticks: 2
 nimg_snapshot: 16
-g_lr: 0.00025
-d_lr: 0.00025
+
+# CORRECTED: Using differential learning rates to re-balance the training.
+# The discriminator's LR is now lower, giving the generator a chance to catch up.
+g_lr: 0.0002
+d_lr: 0.0001
+
 adam_betas: [0.0, 0.99]
 adam_eps: 1.0e-8
 r1_gamma: 5.0
@@ -17,7 +21,6 @@ pl_decay: 0.01
 ema_kimg: 10.0
 ema_rampup_ratio: 0.05
 ema_beta: 0.999
-# CORRECTED: Moved gradient_clip_val here for manual use in the LightningModule.
 gradient_clip_val: 1.0 
 ada_kwargs:
   target_rt: 0.6
@@ -30,5 +33,4 @@ trainer:
   accelerator: auto
   devices: auto
   log_every_n_steps: 2
-  # REMOVED: gradient_clip_val is not supported with manual optimization.
 
