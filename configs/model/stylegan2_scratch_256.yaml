@@ -1,6 +1,7 @@
 # configs/model/stylegan2_scratch_256.yaml
 
 _target_: src.lightning_modules.stylegan2_scratch_module.StyleGAN2ScratchLightningModule
+model_name: "stylegan2_scratch_256"
 
 # --- AugmentPipe Configuration ---
 # These kwargs are passed to the AugmentPipe. The 'enabled' flag is removed

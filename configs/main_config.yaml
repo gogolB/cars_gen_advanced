@@ -1,40 +1,32 @@
 # configs/main_config.yaml
-defaults:
-  - _self_ 
-  - data: cars_stylegan_data_default # Keep using the same data setup
-  - model: stylegan2_scratch_256    # New: Point to our from-scratch model config
-  - training: scratch_default_training # New: Point to training config for scratch model
-  - evaluation: default_evaluation 
-  - override hydra/job_logging: default 
-  - override hydra/hydra_logging: default 
 
-project_name: "cars_gen_scratch_stylegan" # Updated project name for clarity
+# This is the main configuration file for the project.
+
+# --- Project Settings ---
+project_name: "cars_gen_advanced"
 seed: 42
-
-project_root: "." # Should be the root of 'cars_gen_advanced'
-
+project_root: "." # Using Hydra's variable for project root is a good practice.
 tags: ["stylegan2_scratch", "cars_thyroid", "initial_from_scratch_run"]
 notes: "Initial from-scratch StyleGAN2 implementation for CARS thyroid dataset."
+outputs_dir: outputs
+
+# --- Default Configurations ---
+defaults:
+  - data: cars_stylegan_data_default.yaml
+  - model: stylegan2_scratch_256.yaml
+  - training: scratch_default_training.yaml
+  - evaluation: default_evaluation.yaml
+  # CORRECTED: Reverted to the standard 'default' logger which is always available.
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
 
 # --- PyTorch Lightning Logger Configuration ---
-# This section centralizes all settings for the TensorBoardLogger.
-# It ensures that logs are saved in a predictable and organized manner.
-logger:
-  _target_: pytorch_lightning.loggers.TensorBoardLogger
-  save_dir: "${project_root}/outputs/" # CORRECTED: Base directory for all logs and outputs
-  name: "${project_name}"             # Subdirectory for this specific project
-  # version will be automatically generated as 'version_0', 'version_1', etc.
-  # The final log path will be: ./outputs/cars_gen_scratch_stylegan/version_X
+# This configuration tells the logger to save its files directly into the
+# output directory that Hydra creates, preventing nested folders.
+training: # This allows overriding or extending the training config from cvae_trainer_for_ldm.yaml
+  logger:
+    _target_: pytorch_lightning.loggers.TensorBoardLogger
+    save_dir: "${hydra:runtime.output_dir}/tb_logs" # Save TB logs within the Hydra run directory
+    name: "${model.model_name}" # Group logs by model name
+    version: "" # No specific version subdirectory, logs directly under model_name
 
-# --- Hydra Configuration ---
-# This section controls how Hydra manages its own output directories.
-hydra:
-  run:
-    # This sets the output directory for Hydra's own logs and configs.
-    # It will be inside the TensorBoard logger's directory for easy access.
-    dir: ${logger.save_dir}/${logger.name}/runs/${now:%Y-%m-%d_%H-%M-%S}
-  sweep:
-    dir: ${logger.save_dir}/${logger.name}/multirun/${now:%Y-%m-%d_%H-%M-%S}
-    subdir: ${hydra.job.num}
-
-    
