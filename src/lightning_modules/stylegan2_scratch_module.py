@@ -127,13 +127,19 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.ada_stats.copy_(d_real_logits.sign().mean().lerp(self.ada_stats, 0.999))
         d_loss = compute_d_loss_logistic(d_real_logits, d_fake_logits)
         self.log('d_loss/main', d_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
+        
         if self.r1_gamma > 0 and (self.global_step % self.d_reg_interval == 0):
             real_images_for_r1 = real_images_aug.detach().requires_grad_(True)
             d_real_logits_r1 = self.D(real_images_for_r1)
             r1_penalty = compute_r1_penalty(real_images_for_r1, d_real_logits_r1) * (self.r1_gamma / 2) * self.d_reg_interval
+            
+            # CORRECTED: Added diagnostic logging for NaN penalties.
             if not torch.isnan(r1_penalty).any():
                 d_loss += r1_penalty
                 self.log('d_loss/r1', r1_penalty, on_step=True, batch_size=current_batch_size)
+            else:
+                self.log('d_loss/r1_nan_skipped', 1.0, on_step=True, batch_size=current_batch_size)
+
         self.manual_backward(d_loss)
         opt_d.step()
         
@@ -147,37 +153,36 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         d_fake_logits_g = self.D(fake_images_g_aug)
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
         self.log('g_loss/main', g_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
+        
         if self.pl_weight > 0 and (self.global_step % self.g_reg_interval == 0):
             pl_z = torch.randn(current_batch_size // 2, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
             ws_pl = self.G.mapping(pl_z)
-            path_lengths = calculate_path_lengths(ws_pl.unsqueeze(1).repeat(1, self.G.num_ws, 1), self.G.synthesis)
+            # Note: Path length regularization in the original paper is calculated on w, not w_broadcasted
+            path_lengths = calculate_path_lengths(ws_pl, self.G.synthesis)
             pl_penalty = (path_lengths - self.pl_mean).square()
             self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
             pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
+            
+            # CORRECTED: Added diagnostic logging for NaN penalties and restored pl_mean logging.
             if not torch.isnan(pl_loss).any():
                 g_loss += pl_loss
-                self.log('g_loss/pl', pl_loss, on_step=True, batch_size=current_batch_size)
+                self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
+                self.log('g_loss/pl_mean', self.pl_mean, on_step=True, batch_size=current_batch_size)
+            else:
+                self.log('g_loss/pl_nan_skipped', 1.0, on_step=True, batch_size=current_batch_size)
+
         self.manual_backward(g_loss)
         opt_g.step()
 
         # --- EMA Update ---
-        # CORRECTED: Wrap the entire EMA update in a no_grad() context
-        # to prevent in-place modification errors on variables that require gradients.
         with torch.no_grad():
             world_size = self.trainer.world_size if self.trainer else 1
             self.cur_nimg += current_batch_size * world_size
             ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
             ema_nimg = ema_kimg * 1000
-            
-            # The 'beta' for the EMA decay, calculated based on kimg.
             beta = 0.5 ** ((current_batch_size * world_size) / max(ema_nimg, 1e-8))
-            
-            # Update main generator parameters
             for p_ema, p_main in zip(self.G_ema.parameters(), self.G.parameters()):
-                # Explicitly calculate the new value and use .copy_() for the update.
                 p_ema.copy_(p_main.lerp(p_ema, beta))
-                
-            # Update generator buffers
             for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
                 b_ema.copy_(b_main)
 
