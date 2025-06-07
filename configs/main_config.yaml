@@ -5,37 +5,32 @@
 # --- Project Settings ---
 project_name: "cars_gen_advanced"
 seed: 42
-project_root: "." # Using Hydra's variable for project root is a good practice.
+project_root: "."
 tags: ["stylegan2_scratch", "cars_thyroid", "initial_from_scratch_run"]
 notes: "Initial from-scratch StyleGAN2 implementation for CARS thyroid dataset."
 
 # --- Default Configurations ---
 defaults:
+  # CORRECTED: Added '_self_' to follow Hydra 1.1+ best practices
+  # and resolve the UserWarning.
+  - _self_
   - data: cars_stylegan_data_default.yaml
   - model: stylegan2_scratch_256.yaml
   - training: scratch_default_training.yaml
   - evaluation: default_evaluation.yaml
-  # Re-enabled colorlog now that the dependency is installed.
-  - override hydra/job_logging: colorlog
-  - override hydra/hydra_logging: colorlog
+  - override hydra/job_logging: default
+  - override hydra/hydra_logging: default
 
 # --- PyTorch Lightning Logger Configuration ---
-# This configuration tells the logger to save its files directly into the
-# output directory that Hydra creates, preventing any ambiguity.
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
-  # CORRECTED: Explicitly set the save_dir to the CWD, which Hydra controls.
   save_dir: "."
-  # An empty name/version prevents the logger from creating extra subdirectories.
   name: ""
   version: ""
-  # The final log path will be the one defined by hydra.run.dir.
 
 # --- Hydra Configuration ---
-# This section has the sole responsibility for defining the output path.
 hydra:
   run:
-    # This sets the output directory for the entire run. The script's CWD will be this path.
     dir: ${project_root}/outputs/${project_name}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
     dir: ${project_root}/outputs/${project_name}/multirun/${now:%Y-%m-%d_%H-%M-%S}

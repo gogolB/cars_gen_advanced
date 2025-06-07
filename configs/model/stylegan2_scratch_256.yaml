@@ -2,40 +2,34 @@
 
 _target_: src.lightning_modules.stylegan2_scratch_module.StyleGAN2ScratchLightningModule
 
-# --- AugmentPipe Configuration ---
-# These kwargs are passed to the AugmentPipe. The 'enabled' flag is removed
-# as the pipe is now controlled dynamically by the ADA 'p' value.
-augment_pipe_kwargs:
-  # Individual probabilities for each augmentation in the recipe
-  p_xflip: 0.5
-  p_rotate90: 0.5
-  p_brightness: 0.5
-  p_contrast: 0.5
-  # Parameter ranges for color augmentations
-  brightness_range: [-0.2, 0.2]
-  contrast_range: [0.8, 1.2]
+# CORRECTED: All model-specific parameters are now nested under 'model_cfg'
+# to match the argument name in the Lightning Module's __init__ method.
+model_cfg:
+  augment_pipe_kwargs:
+    p_xflip: 0.5
+    p_rotate90: 0.5
+    p_brightness: 0.5
+    p_contrast: 0.5
+    brightness_range: [-0.2, 0.2]
+    contrast_range: [0.8, 1.2]
 
+  generator_kwargs:
+    z_dim: 512
+    w_dim: 512
+    num_mapping_layers: 8
+    img_resolution: 256
+    img_channels: 1 # Grayscale CARS images
+    mapping_lr_mul: 0.01
+    channel_base: 16384
+    channel_max: 512
+    resample_kernel: [1,3,3,1]
 
-# --- Generator Configuration ---
-generator_kwargs:
-  z_dim: 512
-  w_dim: 512
-  num_mapping_layers: 8
-  img_resolution: 256
-  img_channels: 1 # Grayscale CARS images
-  mapping_lr_mul: 0.01
-  # SynthesisNetwork kwargs
-  channel_base: 16384 
-  channel_max: 512
-  resample_kernel: [1,3,3,1]
-
-# --- Discriminator Configuration ---
-discriminator_kwargs:
-  img_resolution: 256
-  img_channels: 1
-  channel_base: 16384 
-  channel_max: 512
-  mbstd_group_size: 4 
-  mbstd_num_features: 1
-  resample_kernel: [1,3,3,1]
+  discriminator_kwargs:
+    img_resolution: 256
+    img_channels: 1
+    channel_base: 16384
+    channel_max: 512
+    mbstd_group_size: 4
+    mbstd_num_features: 1
+    resample_kernel: [1,3,3,1]
 
