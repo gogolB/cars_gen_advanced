@@ -61,11 +61,10 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.register_buffer('pl_mean', torch.zeros([]))
 
         # --- AugmentPipe Initialization ---
-        # NOTE: We now only check for the existence of augment_pipe_kwargs.
-        # The 'enabled' flag is effectively replaced by the dynamic 'ada_p'.
         if self.hparams.model_cfg.get('augment_pipe_kwargs'):
             print("Initializing AugmentPipe (from-scratch, ADA-ready)...")
-            self.augment_pipe = AugmentPipe(**self.hparams.model_cfg.augment_pipe_kwargs)
+            # CORRECTED: Pass the config object directly, without unpacking using **
+            self.augment_pipe = AugmentPipe(self.hparams.model_cfg.augment_pipe_kwargs)
         else:
             self.augment_pipe = None
             print("AugmentPipe not configured, augmentations will be skipped.")
@@ -79,11 +78,11 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.ada_interval_kimg = ada_kwargs.get('interval_kimg', 4)
             self.ada_speed_kimg = ada_kwargs.get('speed_kimg', 500)
             
-            self.register_buffer('ada_p', torch.zeros([])) # Master augmentation probability
-            self.register_buffer('ada_stats', torch.zeros([])) # Tracks the overfitting metric (r_t)
+            self.register_buffer('ada_p', torch.zeros([]))
+            self.register_buffer('ada_stats', torch.zeros([]))
             
-            # Convert kimg to number of images for interval and speed
             self.ada_interval = self.ada_interval_kimg * 1000
+            self.batch_size = self.hparams.data_cfg.batch_size 
             self.ada_adjust_speed = self.batch_size * self.ada_interval / (self.ada_speed_kimg * 1000)
             print(f"  ADA Target r_t: {self.ada_target}")
             print(f"  ADA Update Interval: {self.ada_interval_kimg} kimg ({self.ada_interval} images)")
@@ -92,7 +91,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         # --- Training State Tracking ---
         self.cur_nimg = 0
         self.last_ada_update_nimg = 0
-        self.batch_size = self.hparams.data_cfg.batch_size 
         self.automatic_optimization = False 
 
         print("StyleGAN2ScratchLightningModule initialized.")
@@ -154,16 +152,13 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         
         # Apply augmentations (controlled by current_p) to both real and fake images
         real_images_for_d = self.augment_pipe(real_images, p=current_p) if self.augment_pipe else real_images
-        fake_images_for_d = self.augment_pipe(fake_images_d, p=current_p) if self.augment_pipe else fake_images_d
+        fake_images_for_d = self.augment_pipe(fake_images_d.detach(), p=current_p) if self.augment_pipe else fake_images_d.detach()
         
         d_real_logits = self.D(real_images_for_d) 
         d_fake_logits = self.D(fake_images_for_d) 
 
         # --- ADA: Update overfitting metric (r_t) ---
         if self.ada_enabled:
-            # The metric is the average sign of the real logits.
-            # A positive sign means D correctly identifies it as real.
-            # High values (close to 1) suggest overfitting.
             signs = d_real_logits.sign().detach()
             self.ada_stats.copy_(signs.mean().lerp(self.ada_stats, 0.999))
             
@@ -200,7 +195,8 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
 
         # Path Length Regularization (PLR)
         if self.pl_weight > 0 and (self.global_step % self.g_reg_interval == 0):
-            pl_z = torch.randn(real_images.shape[0] // 2, self.G.z_dim, device=self.device)
+            pl_batch_size = max(1, real_images.shape[0] // 2)
+            pl_z = torch.randn(pl_batch_size, self.G.z_dim, device=self.device)
             ws_single = self.G.mapping(pl_z)
             ws_for_plr = ws_single.unsqueeze(1).repeat(1, self.G.num_ws, 1)
             path_lengths = calculate_path_lengths(ws_for_plr, self.G.synthesis)
@@ -220,7 +216,8 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         self.cur_nimg += self.batch_size * world_size
 
         if self.ema_nimg != float('inf'):
-            beta = 0.5 ** ((self.batch_size * world_size) / max(self.ema_nimg, 1e-8))
+            ema_rampup = self.ema_nimg / (self.batch_size * world_size)
+            beta = 0.5 ** (1.0 / max(ema_rampup, 1e-8))
         else:
             beta = self.ema_beta
         
@@ -247,10 +244,13 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         # Snapshot generation logic
         if self.trainer.is_global_zero:
             cfg = self.hparams.training_cfg
-            steps_per_kimg = 1000 / (self.batch_size * self.trainer.world_size)
-            snapshot_interval = int(steps_per_kimg * cfg.kimg_per_tick * cfg.snapshot_ticks)
-            if snapshot_interval > 0 and (self.global_step + 1) % snapshot_interval == 0:
-                self.generate_and_log_samples()
+            world_size = self.trainer.world_size if self.trainer else 1
+            effective_batch_size = self.batch_size * world_size
+            if effective_batch_size > 0:
+                steps_per_kimg = 1000 / effective_batch_size
+                snapshot_interval = int(steps_per_kimg * cfg.kimg_per_tick * cfg.snapshot_ticks)
+                if snapshot_interval > 0 and (self.global_step + 1) % snapshot_interval == 0:
+                    self.generate_and_log_samples()
 
     @torch.no_grad()
     def generate_and_log_samples(self):
