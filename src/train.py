@@ -21,14 +21,11 @@ def train(cfg: DictConfig) -> Optional[float]:
     print("Initializing DataModule...")
     datamodule: pl.LightningDataModule = hydra.utils.instantiate(cfg.data)
 
-    # CORRECTED: This instantiation now works because the structure of
-    # cfg.model (with its nested 'model_cfg' key) perfectly matches the
-    # arguments of the StyleGAN2ScratchLightningModule's __init__ method.
     print("Initializing Model...")
     model: pl.LightningModule = hydra.utils.instantiate(
         cfg.model,
         training_cfg=cfg.training,
-        data_cfg=cfg.data
+        batch_size=cfg.data.batch_size
     )
 
     print("Setting up Logger...")
@@ -39,12 +36,28 @@ def train(cfg: DictConfig) -> Optional[float]:
     if "callbacks" in cfg and cfg.callbacks:
         for _, cb_conf in cfg.callbacks.items():
             callbacks.append(hydra.utils.instantiate(cb_conf))
-
+    
+    # --- Trainer Initialization ---
     print("Initializing Trainer...")
-    trainer = pl.Trainer(
+    
+    # Calculate max_steps from total_kimg.
+    effective_batch_size = cfg.data.batch_size
+    devices_cfg = cfg.training.trainer.get("devices", 1)
+    if isinstance(devices_cfg, int):
+        effective_batch_size *= devices_cfg
+    elif isinstance(devices_cfg, list):
+        effective_batch_size *= len(devices_cfg)
+        
+    max_steps = int((cfg.training.total_kimg * 1000) / effective_batch_size)
+    print(f"Calculated max_steps: {max_steps} for total_kimg: {cfg.training.total_kimg}")
+
+    # CORRECTED: Instantiate the Trainer using the nested 'trainer' block from the config
+    # and override max_steps with our calculated value.
+    trainer = hydra.utils.instantiate(
+        cfg.training.trainer,
+        max_steps=max_steps,
         logger=logger,
-        callbacks=callbacks,
-        **cfg.training # Pass all training parameters from config
+        callbacks=callbacks
     )
 
     print("Starting Training...")
@@ -60,7 +73,6 @@ def main_hydra(cfg: DictConfig) -> Optional[float]:
         return train(cfg)
     except Exception as e:
         print(f"An error occurred during training: {e}")
-        # Optionally re-raise or handle as needed
         raise
 
 if __name__ == "__main__":

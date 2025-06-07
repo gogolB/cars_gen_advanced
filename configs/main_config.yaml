@@ -24,15 +24,15 @@ defaults:
 # --- PyTorch Lightning Logger Configuration ---
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
-  save_dir: "."
+  save_dir: "${hydra:run.dir}"
   name: ""
   version: ""
 
 # --- Hydra Configuration ---
 hydra:
   run:
-    dir: ${project_root}/outputs/${project_name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${project_root}/outputs/${project_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
   sweep:
-    dir: ${project_root}/outputs/${project_name}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${project_root}/outputs/${project_name}/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
     subdir: ${hydra.job.num}
 
