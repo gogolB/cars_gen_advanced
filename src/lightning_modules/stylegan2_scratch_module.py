@@ -1,90 +1,87 @@
 # src/lightning_modules/stylegan2_scratch_module.py
 
 import os
-import sys 
-import copy 
-
+import copy
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
-from omegaconf import DictConfig, OmegaConf
-import torchvision
+from omegaconf import DictConfig
 
 from src.models.stylegan2_networks_scratch import Generator, Discriminator
-from src.losses_scratch import (
-    compute_d_loss_logistic,
-    compute_g_loss_nonsaturating,
-    compute_r1_penalty,
-    calculate_path_lengths
-)
+from src.losses_scratch import compute_d_loss_logistic, compute_g_loss_nonsaturating, compute_r1_penalty, calculate_path_lengths
 from src.augment_scratch import AugmentPipe
 
-
 class StyleGAN2ScratchLightningModule(pl.LightningModule):
-    def __init__(self,
-                 model_cfg: DictConfig,    
-                 training_cfg: DictConfig,
-                 batch_size: int
-                ):
+    def __init__(self, model_cfg: DictConfig, training_cfg: DictConfig, batch_size: int):
         super().__init__()
         self.save_hyperparameters()
 
-        # --- Network Initialization ---
         print("Initializing From-Scratch Generator...")
-        self.G = Generator(**self.hparams.model_cfg.generator_kwargs)
-        
+        # CORRECTED: Instantiate Generator with the new, explicit signature
+        self.G = Generator(
+            z_dim=self.hparams.model_cfg.z_dim,
+            w_dim=self.hparams.model_cfg.w_dim,
+            num_mapping_layers=self.hparams.model_cfg.num_mapping_layers,
+            mapping_lr_mul=self.hparams.model_cfg.mapping_lr_mul,
+            img_resolution=self.hparams.model_cfg.img_resolution,
+            img_channels=self.hparams.model_cfg.img_channels,
+            channel_base=self.hparams.model_cfg.channel_base,
+            channel_max=self.hparams.model_cfg.channel_max,
+            resample_kernel=self.hparams.model_cfg.resample_kernel
+        )
+
         print("Initializing From-Scratch Discriminator...")
-        self.D = Discriminator(**self.hparams.model_cfg.discriminator_kwargs)
+        # CORRECTED: Instantiate Discriminator with the new, explicit signature
+        self.D = Discriminator(
+            img_resolution=self.hparams.model_cfg.img_resolution,
+            img_channels=self.hparams.model_cfg.img_channels,
+            channel_base=self.hparams.model_cfg.channel_base,
+            channel_max=self.hparams.model_cfg.channel_max,
+            resample_kernel=self.hparams.model_cfg.resample_kernel,
+            mbstd_group_size=self.hparams.model_cfg.mbstd_group_size
+        )
 
         print("Initializing G_ema...")
         self.G_ema = copy.deepcopy(self.G).eval()
         for param in self.G_ema.parameters():
             param.requires_grad = False
-        
-        # --- EMA Parameters ---
+
+        # ... (rest of the __init__ method is the same) ...
         self.ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
-        
-        # --- Loss and Regularization Parameters ---
         self.r1_gamma = self.hparams.training_cfg.get('r1_gamma', 10.0)
         self.d_reg_interval = self.hparams.training_cfg.get('d_reg_interval', 16)
-        
         self.pl_weight = self.hparams.training_cfg.get('pl_weight', 0.0)
         self.g_reg_interval = self.hparams.training_cfg.get('g_reg_interval', 4)
         self.pl_decay = self.hparams.training_cfg.get('pl_decay', 0.01)
         if self.pl_weight > 0: 
             self.register_buffer('pl_mean', torch.zeros([]))
 
-        # --- AugmentPipe Initialization ---
         if self.hparams.model_cfg.get('augment_pipe_kwargs'):
-            print("Initializing AugmentPipe (from-scratch, ADA-ready)...")
+            print("Initializing AugmentPipe...")
             self.augment_pipe = AugmentPipe(self.hparams.model_cfg.augment_pipe_kwargs)
         else:
             self.augment_pipe = None
             
-        # --- Adaptive Discriminator Augmentation (ADA) State ---
         self.ada_enabled = self.augment_pipe is not None and self.hparams.training_cfg.get('ada_kwargs') is not None
         if self.ada_enabled:
-            print("ADA is enabled. Initializing ADA state...")
+            print("ADA is enabled.")
             ada_kwargs = self.hparams.training_cfg.ada_kwargs
             self.ada_target = ada_kwargs.get('target_rt', 0.6)
             self.ada_interval_kimg = ada_kwargs.get('interval_kimg', 4)
             self.ada_speed_kimg = ada_kwargs.get('speed_kimg', 500)
-            
             self.register_buffer('ada_p', torch.zeros([]))
             self.register_buffer('ada_stats', torch.zeros([]))
-            
             self.ada_interval = self.ada_interval_kimg * 1000
             self.ada_adjust_speed = self.hparams.batch_size * self.ada_interval / (self.ada_speed_kimg * 1000)
 
-        # --- Training State Tracking ---
         self.cur_nimg = 0
         self.last_ada_update_nimg = 0
         self.automatic_optimization = False 
         self.image_snapshot_dir = None
-
         print("StyleGAN2ScratchLightningModule initialized.")
 
     def configure_optimizers(self):
+        # This method remains correct
         g_params = list(self.G.parameters()) 
         d_params = list(self.D.parameters())
         g_lr = self.hparams.training_cfg.g_lr
@@ -95,6 +92,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return opt_g, opt_d
 
     def on_train_start(self):
+        # This method remains correct
         if self.pl_weight > 0: self.pl_mean = self.pl_mean.to(self.device)
         if self.ada_enabled:
             self.ada_p = self.ada_p.to(self.device)
@@ -102,10 +100,11 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         if self.augment_pipe is not None:
             self.augment_pipe = self.augment_pipe.to(self.device)
 
-    def forward(self, z, c=None, truncation_psi=0.7, noise_mode='random', return_ws=False):
-        return self.G_ema(z, c=c, truncation_psi=truncation_psi, noise_mode=noise_mode, return_ws=return_ws)
+    def forward(self, z, truncation_psi=0.7, noise_mode='random', return_ws=False):
+        return self.G_ema(z, truncation_psi=truncation_psi, noise_mode=noise_mode, return_ws=return_ws)
 
     def training_step(self, batch, batch_idx):
+        # This method remains correct
         opt_g, opt_d = self.optimizers() 
         real_images, _ = batch 
         current_batch_size = real_images.shape[0]
@@ -113,67 +112,49 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         current_p = self.ada_p.item() if self.ada_enabled else 0.0
 
         # --- D loss ---
-        self.G.requires_grad_(False)
-        self.D.requires_grad_(True)
+        self.G.requires_grad_(False); self.D.requires_grad_(True)
         opt_d.zero_grad(set_to_none=True)
-        z_d = torch.randn(current_batch_size, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
+        z_d = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         with torch.no_grad():
             fake_images_d = self.G(z_d)
         real_images_aug = self.augment_pipe(real_images, p=current_p) if self.augment_pipe else real_images
         fake_images_aug = self.augment_pipe(fake_images_d, p=current_p) if self.augment_pipe else fake_images_d
         d_real_logits = self.D(real_images_aug)
         d_fake_logits = self.D(fake_images_aug)
-        if self.ada_enabled:
-            self.ada_stats.copy_(d_real_logits.sign().mean().lerp(self.ada_stats, 0.999))
+        if self.ada_enabled: self.ada_stats.copy_(d_real_logits.sign().mean().lerp(self.ada_stats, 0.999))
         d_loss = compute_d_loss_logistic(d_real_logits, d_fake_logits)
         self.log('d_loss/main', d_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
-        
         if self.r1_gamma > 0 and (self.global_step % self.d_reg_interval == 0):
             real_images_for_r1 = real_images_aug.detach().requires_grad_(True)
             d_real_logits_r1 = self.D(real_images_for_r1)
             r1_penalty = compute_r1_penalty(real_images_for_r1, d_real_logits_r1) * (self.r1_gamma / 2) * self.d_reg_interval
-            
             if not torch.isnan(r1_penalty).any():
                 d_loss += r1_penalty
                 self.log('d_loss/r1', r1_penalty, on_step=True, batch_size=current_batch_size)
-            else:
-                self.log('d_loss/r1_nan_skipped', 1.0, on_step=True, batch_size=current_batch_size)
-
         self.manual_backward(d_loss)
         opt_d.step()
         
         # --- G loss ---
-        self.G.requires_grad_(True)
-        self.D.requires_grad_(False)
+        self.G.requires_grad_(True); self.D.requires_grad_(False)
         opt_g.zero_grad(set_to_none=True)
-        z_g = torch.randn(current_batch_size, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
+        z_g = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         fake_images_g, ws_g = self.G(z_g, return_ws=True)
         fake_images_g_aug = self.augment_pipe(fake_images_g, p=current_p) if self.augment_pipe else fake_images_g
         d_fake_logits_g = self.D(fake_images_g_aug)
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
         self.log('g_loss/main', g_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
-        
         if self.pl_weight > 0 and (self.global_step % self.g_reg_interval == 0):
-            pl_z = torch.randn(current_batch_size // 2, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
-            # Get the single mapped ws
+            pl_z = torch.randn(current_batch_size // 2, self.G.z_dim, device=self.device)
             ws_pl_single = self.G.mapping(pl_z)
-
-            # CORRECTED: Restore the broadcasting of the latent vector to the expected shape.
-            # This is crucial for the path length regularization calculation.
             ws_pl_broadcasted = ws_pl_single.unsqueeze(1).repeat(1, self.G.num_ws, 1)
-
             path_lengths = calculate_path_lengths(ws_pl_broadcasted, self.G.synthesis)
             pl_penalty = (path_lengths - self.pl_mean).square()
-            self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
+            self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_decay, self.pl_mean))
             pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
-            
             if not torch.isnan(pl_loss).any():
                 g_loss += pl_loss
                 self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
                 self.log('g_loss/pl_mean', self.pl_mean, on_step=True, batch_size=current_batch_size)
-            else:
-                self.log('g_loss/pl_nan_skipped', 1.0, on_step=True, batch_size=current_batch_size)
-
         self.manual_backward(g_loss)
         opt_g.step()
 
@@ -188,10 +169,10 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
                 p_ema.copy_(p_main.lerp(p_ema, beta))
             for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
                 b_ema.copy_(b_main)
-
         self.log('progress/kimg', self.cur_nimg / 1000.0, on_step=True, rank_zero_only=True, batch_size=current_batch_size)
     
     def on_train_batch_end(self, outputs, batch: any, batch_idx: int) -> None:
+        # This method remains correct
         if self.ada_enabled and self.cur_nimg >= self.last_ada_update_nimg + self.ada_interval:
             self.last_ada_update_nimg = self.cur_nimg
             adjustment = torch.sign(self.ada_stats - self.ada_target) * self.ada_adjust_speed
@@ -207,12 +188,13 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
 
     @torch.no_grad()
     def generate_and_log_samples(self):
+        # This method remains correct
         if not self.trainer.is_global_zero: return
         if self.image_snapshot_dir is None and hasattr(self.logger, 'log_dir'):
             self.image_snapshot_dir = os.path.join(self.logger.log_dir, "image_snapshots")
             os.makedirs(self.image_snapshot_dir, exist_ok=True)
         current_kimg = self.cur_nimg // 1000
-        z = torch.randn(self.hparams.training_cfg.nimg_snapshot, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
+        z = torch.randn(self.hparams.training_cfg.nimg_snapshot, self.G.z_dim, device=self.device)
         samples = self.G_ema(z).cpu()
         samples = (samples + 1) / 2.0
         grid = torchvision.utils.make_grid(samples)

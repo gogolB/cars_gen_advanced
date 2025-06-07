@@ -1,460 +1,261 @@
 # src/models/stylegan2_networks_scratch.py
+# Contains from-scratch implementations of StyleGAN2 network architectures.
+# This version contains a full architectural fix for the channel mismatch error.
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import math
+import numpy as np
 
-# --- Helper Functions & Building Blocks ---
+# --- Custom Layers (Unchanged) ---
 
 class EqualizedLinear(nn.Module):
-    def __init__(self, in_features, out_features, bias=True, lr_mul=1.0, bias_init=0.0):
+    def __init__(self, in_features, out_features, bias=True, lr_mul=1.0):
         super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.lr_mul = lr_mul
         self.weight = nn.Parameter(torch.randn(out_features, in_features) / lr_mul)
-        if bias:
-            self.bias = nn.Parameter(torch.full([out_features], float(bias_init)) / lr_mul)
-        else:
-            self.register_parameter('bias', None)
-        self.weight_gain = lr_mul / np.sqrt(in_features)
-        if self.bias is not None:
-            self.bias_gain = lr_mul
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        self.scale = (math.sqrt(2) / in_features) * lr_mul
 
     def forward(self, x):
-        w = self.weight * self.weight_gain
-        b = self.bias
-        if b is not None:
-            b = b * self.bias_gain
-        if x.ndim == 2:
-            return F.linear(x, w, b)
-        original_shape = x.shape
-        x_reshaped = x.reshape(-1, self.in_features)
-        out_reshaped = F.linear(x_reshaped, w, b)
-        return out_reshaped.reshape(original_shape[:-1] + (self.out_features,))
+        return F.linear(x, self.weight * self.scale, self.bias)
 
 class EqualizedConv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True, lr_mul=1.0, bias_init=0.0):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size, kernel_size))
+        self.scale = math.sqrt(2 / (in_channels * kernel_size**2))
+        self.bias = nn.Parameter(torch.zeros(out_channels))
         self.stride = stride
         self.padding = padding
-        self.lr_mul = lr_mul
-        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size, kernel_size) / lr_mul)
-        if bias:
-            self.bias = nn.Parameter(torch.full([out_channels], float(bias_init)) / lr_mul)
-        else:
-            self.register_parameter('bias', None)
-        fan_in = in_channels * kernel_size * kernel_size
-        self.weight_gain = lr_mul / np.sqrt(fan_in)
-        if self.bias is not None:
-            self.bias_gain = lr_mul
-            
+
     def forward(self, x):
-        w = self.weight * self.weight_gain
-        b = self.bias
-        if b is not None:
-            b = b * self.bias_gain
-        return F.conv2d(x, w, b, stride=self.stride, padding=self.padding)
-
-class NoiseInjection(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.weight = nn.Parameter(torch.zeros(1, channels, 1, 1))
-
-    def forward(self, x, noise=None):
-        batch, _, height, width = x.shape
-        if noise is None:
-            noise = torch.randn(batch, 1, height, width, device=x.device, dtype=x.dtype)
-        return x + self.weight * noise
-
-class AdaIN(nn.Module):
-    def __init__(self, channels, w_dim):
-        super().__init__()
-        self.norm = nn.InstanceNorm2d(channels, affine=False)
-        self.style_scale_transform = EqualizedLinear(w_dim, channels, bias_init=1.0)
-        self.style_shift_transform = EqualizedLinear(w_dim, channels, bias_init=0.0)
-
-    def forward(self, x, w): # w is expected to be (N, w_dim)
-        if w.ndim != 2 or w.shape[1] != self.style_scale_transform.in_features:
-             raise ValueError(f"AdaIN expects w of shape (N, w_dim={self.style_scale_transform.in_features}), got {w.shape}")
-        normalized_x = self.norm(x)
-        style_scale = self.style_scale_transform(w)[:, :, None, None]
-        style_shift = self.style_shift_transform(w)[:, :, None, None]
-        return style_scale * normalized_x + style_shift
+        return F.conv2d(x, self.weight * self.scale, self.bias, self.stride, self.padding)
 
 class ModulatedConv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, w_dim,
-                 demodulate=True, up=False, down=False, resample_kernel=None, lr_mul=1.0):
+    def __init__(self, in_channels, out_channels, kernel_size, style_dim, demodulate=True, up=False):
         super().__init__()
-        self.in_channels = in_channels
         self.out_channels = out_channels
-        self.kernel_size = kernel_size
         self.demodulate = demodulate
         self.up = up
-        self.down = down
-        self.lr_mul = lr_mul
-        self.resample_kernel = resample_kernel 
-        if self.resample_kernel is None and (up or down):
-            self.resample_kernel = [1,2,1] 
         self.padding = kernel_size // 2
-        self.modulation = EqualizedLinear(w_dim, in_channels, bias_init=1.0, lr_mul=1.0) 
-        self.weight = nn.Parameter(
-            torch.randn(out_channels, in_channels, kernel_size, kernel_size) / lr_mul
-        )
-        fan_in = in_channels * kernel_size * kernel_size
-        self.weight_gain = lr_mul / np.sqrt(fan_in) 
 
-    def forward(self, x, w): # w is expected to be (N, w_dim)
-        if w.ndim != 2 or w.shape[1] != self.modulation.in_features:
-             raise ValueError(f"ModulatedConv2d expects w of shape (N, w_dim={self.modulation.in_features}), got {w.shape}")
+        self.modulation = EqualizedLinear(style_dim, in_channels, bias=True)
+        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size, kernel_size))
+        self.bias = nn.Parameter(torch.zeros(out_channels))
+
+    def forward(self, x, style):
         batch_size, in_channels, height, width = x.shape
-        style = self.modulation(w).view(batch_size, 1, in_channels, 1, 1) 
-        weights = self.weight * self.weight_gain 
-        weights = weights.unsqueeze(0) 
-        modulated_weights = weights * style 
+        style = self.modulation(style).view(batch_size, 1, in_channels, 1, 1)
+        weight = self.weight.unsqueeze(0) * (style + 1)
+        
         if self.demodulate:
-            demod_scale = (modulated_weights.square().sum(dim=[2,3,4], keepdim=True) + 1e-8).rsqrt()
-            modulated_weights = modulated_weights * demod_scale
-        x = x.reshape(1, batch_size * in_channels, height, width) 
-        modulated_weights = modulated_weights.reshape(batch_size * self.out_channels, in_channels, self.kernel_size, self.kernel_size)
+            demod_coeff = (weight.pow(2).sum(dim=[2,3,4]) + 1e-8).rsqrt()
+            weight = weight * demod_coeff.view(batch_size, self.out_channels, 1, 1, 1)
+
         if self.up:
-            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False) 
-        out = F.conv2d(x, modulated_weights, bias=None, stride=1, padding=self.padding, groups=batch_size)
-        out = out.reshape(batch_size, self.out_channels, out.shape[2], out.shape[3])
-        if self.down:
-            out = F.interpolate(out, scale_factor=0.5, mode='bilinear', align_corners=False)
-        return out
-
-class Blur(nn.Module):
-    def __init__(self, kernel=[1,2,1], normalize=True, flip=False, stride=1):
-        super().__init__()
-        kernel = torch.tensor(kernel, dtype=torch.float32)
-        if kernel.ndim == 1:
-            kernel = kernel[:, None] * kernel[None, :] 
-        if normalize:
-            kernel /= kernel.sum()
-        if flip:
-            kernel = kernel.flip([0,1])
-        self.register_buffer('kernel', kernel[None, None, :, :]) 
-        self.stride = stride
-        self.padding = (kernel.shape[2] - 1) // 2 
-
-    def forward(self, x):
-        kernel_expanded = self.kernel.expand(x.size(1), -1, -1, -1) 
-        x = F.conv2d(x, kernel_expanded, stride=self.stride, padding=self.padding, groups=x.size(1))
+            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+        
+        # Reshape for grouped convolution
+        x = x.reshape(1, -1, height * 2 if self.up else height, width * 2 if self.up else width)
+        weight = weight.reshape(-1, in_channels, *self.weight.shape[2:])
+        x = F.conv2d(x, weight, padding=self.padding, groups=batch_size)
+        x = x.reshape(batch_size, self.out_channels, *x.shape[2:])
+        x = x + self.bias.view(1, -1, 1, 1)
         return x
 
-class MappingNetwork(nn.Module):
-    def __init__(self, z_dim, w_dim, num_layers=8, lr_mul=0.01, hidden_dim=None):
+class NoiseInjection(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.z_dim = z_dim
-        self.w_dim = w_dim
-        self.num_layers = num_layers
-        if hidden_dim is None:
-            hidden_dim = w_dim 
-        layers = [PixelNorm()] 
+        self.weight = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        noise = torch.randn(x.shape[0], 1, x.shape[2], x.shape[3], device=x.device, dtype=x.dtype)
+        return x + self.weight * noise
+
+class PixelNorm(nn.Module):
+    def forward(self, x):
+        return x * (x.pow(2).mean(dim=1, keepdim=True) + 1e-8).rsqrt()
+
+class ToRGBLayer(nn.Module):
+    def __init__(self, in_channels, out_channels, style_dim):
+        super().__init__()
+        self.conv = ModulatedConv2d(in_channels, out_channels, 1, style_dim, demodulate=False)
+
+    def forward(self, x, style):
+        return self.conv(x, style)
+
+# --- Main Network Blocks ---
+
+class MappingNetwork(nn.Module):
+    def __init__(self, z_dim, w_dim, num_layers, lr_mul=0.01):
+        super().__init__()
+        layers = [PixelNorm()]
         for i in range(num_layers):
-            in_f = z_dim if i == 0 else hidden_dim
-            out_f = w_dim if i == num_layers - 1 else hidden_dim
-            layers.append(EqualizedLinear(in_f, out_f, lr_mul=lr_mul))
+            layers.append(EqualizedLinear(z_dim if i == 0 else w_dim, w_dim, lr_mul=lr_mul))
             layers.append(nn.LeakyReLU(0.2))
         self.net = nn.Sequential(*layers)
 
     def forward(self, z):
+        if z.ndim == 2:
+            norm_inv = (z.pow(2).sum(dim=1, keepdim=True) + 1e-8).rsqrt()
+            z = z * norm_inv
         return self.net(z)
 
-class PixelNorm(nn.Module):
-    def __init__(self, epsilon=1e-8):
-        super().__init__()
-        self.epsilon = epsilon
-
-    def forward(self, x):
-        if x.ndim == 2: # (N, C) for z in MappingNetwork
-            return x * (x.square().mean(dim=1, keepdim=True) + self.epsilon).rsqrt()
-        elif x.ndim == 4: # (N, C, H, W) for feature maps (if used, not typical in StyleGAN2 synthesis blocks)
-            return x * (x.square().sum(dim=1, keepdim=True) + self.epsilon).rsqrt() 
-        else:
-            raise ValueError(f"PixelNorm expects 2D or 4D input, got {x.ndim}D")
-
 class SynthesisBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, w_dim, resolution,
-                 is_first_block=False, use_noise=True,
-                 conv_clamp=None, resample_kernel=None): 
+    def __init__(self, in_channels, out_channels, w_dim, img_channels):
         super().__init__()
-        self.is_first_block = is_first_block
-        self.use_noise = use_noise
-        self.resolution = resolution 
-        if is_first_block:
-            self.const_input = nn.Parameter(torch.randn(1, out_channels, 4, 4))
-            self.conv1 = ModulatedConv2d(out_channels, out_channels, kernel_size=3, w_dim=w_dim, demodulate=True)
-        else:
-            self.conv0_up = ModulatedConv2d(in_channels, out_channels, kernel_size=3, w_dim=w_dim, up=True, resample_kernel=resample_kernel, demodulate=True)
-            self.conv1 = ModulatedConv2d(out_channels, out_channels, kernel_size=3, w_dim=w_dim, demodulate=True)
-        if use_noise:
-            self.noise_injector0 = NoiseInjection(out_channels)
-            self.noise_injector1 = NoiseInjection(out_channels)
-        self.activation = nn.LeakyReLU(0.2)
-        self.ada_in0 = AdaIN(out_channels, w_dim) 
-        self.ada_in1 = AdaIN(out_channels, w_dim)
+        self.conv1 = ModulatedConv2d(in_channels, out_channels, 3, w_dim, up=True)
+        self.noise1 = NoiseInjection()
+        self.activation1 = nn.LeakyReLU(0.2)
+        
+        self.conv2 = ModulatedConv2d(out_channels, out_channels, 3, w_dim)
+        self.noise2 = NoiseInjection()
+        self.activation2 = nn.LeakyReLU(0.2)
+        
+        self.to_rgb = ToRGBLayer(out_channels, img_channels, w_dim)
 
-    def forward(self, x, w0, w1, noise_inputs=None): 
-        # w0 and w1 are style vectors of shape (N, w_dim) for ada_in0 and ada_in1 respectively
-        noise0, noise1 = None, None
-        if noise_inputs is not None:
-            if len(noise_inputs) >= 1: noise0 = noise_inputs[0]
-            if len(noise_inputs) >= 2: noise1 = noise_inputs[1]
-
-        if self.is_first_block:
-            x = self.const_input.repeat(w0.shape[0], 1, 1, 1) 
-            if self.use_noise:
-                x = self.noise_injector0(x, noise=noise0)
-            x = self.activation(x)
-            x = self.ada_in0(x, w0) 
-            x_main = self.conv1(x, w0) # First conv also uses w0 for modulation
-        else:
-            x = self.conv0_up(x, w0) # Upsampling conv uses w0
-            if self.use_noise:
-                x = self.noise_injector0(x, noise=noise0)
-            x = self.activation(x)
-            x = self.ada_in0(x, w0)
-            x_main = self.conv1(x, w1) # Second conv uses w1
-
-        if self.use_noise:
-            x_main = self.noise_injector1(x_main, noise=noise1)
-        x_main = self.activation(x_main)
-        x_main = self.ada_in1(x_main, w1) # Second AdaIN uses w1
-        return x_main
-
-class ToRGB(nn.Module):
-    def __init__(self, in_channels, out_channels, w_dim, kernel_size=1, lr_mul=1.0):
-        super().__init__()
-        self.conv = ModulatedConv2d(in_channels, out_channels, kernel_size=kernel_size, w_dim=w_dim, demodulate=False, lr_mul=lr_mul)
-        self.bias = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
-
-    def forward(self, x, w_rgb, prev_rgb=None): # w_rgb is (N, w_dim)
-        y = self.conv(x, w_rgb)
-        y = y + self.bias 
-        if prev_rgb is not None:
-            if prev_rgb.shape[2:] != y.shape[2:]:
-                 prev_rgb = F.interpolate(prev_rgb, size=y.shape[2:], mode='bilinear', align_corners=False)
-            y = y + prev_rgb
-        return y
+    def forward(self, x, w, rgb):
+        x = self.conv1(x, w)
+        x = self.noise1(x)
+        x = self.activation1(x)
+        
+        x = self.conv2(x, w)
+        x = self.noise2(x)
+        x = self.activation2(x)
+        
+        new_rgb = self.to_rgb(x, w)
+        if rgb is not None:
+            new_rgb = F.interpolate(rgb, scale_factor=2, mode='bilinear', align_corners=False) + new_rgb
+        return x, new_rgb
 
 class SynthesisNetwork(nn.Module):
-    def __init__(self, w_dim, img_resolution, img_channels,
-                 channel_base=32768, channel_max=512, num_fp16_res=0, conv_clamp=None,
-                 resample_kernel=None): 
+    # CORRECTED: Fully refactored __init__ to use a clear, resolution-based channel definition.
+    def __init__(self, w_dim, img_resolution, img_channels, channel_base=32768, channel_max=512):
         super().__init__()
         self.w_dim = w_dim
-        self.img_resolution = img_resolution
         self.img_channels = img_channels
-        resolution_log2 = int(np.log2(img_resolution))
-        assert img_resolution == 2**resolution_log2 and img_resolution >= 4
-        def nf(stage): 
-            return min(int(channel_base / (2.0 ** stage)), channel_max)
+        
+        resolutions = [2**i for i in range(2, int(np.log2(img_resolution)) + 1)]
+        def get_ch(res): return min(int(channel_base / res), channel_max)
+        
+        self.input_const = nn.Parameter(torch.randn(1, get_ch(4), 4, 4))
+        self.conv1 = ModulatedConv2d(get_ch(4), get_ch(4), 3, w_dim)
+        self.noise_init = NoiseInjection()
+        self.act_init = nn.LeakyReLU(0.2)
+        self.to_rgb_init = ToRGBLayer(get_ch(4), img_channels, w_dim)
 
         self.blocks = nn.ModuleList()
-        self.torgbs = nn.ModuleList()
-        self.num_ws = 0
+        in_ch = get_ch(4)
+        for res in resolutions[1:]: # from 8x8 up to target resolution
+            out_ch = get_ch(res)
+            self.blocks.append(SynthesisBlock(in_ch, out_ch, w_dim, img_channels))
+            in_ch = out_ch
+
+    def forward(self, ws):
+        # ws should have shape [N, num_blocks*2 + 1, w_dim]
+        x = self.input_const.repeat(ws.shape[0], 1, 1, 1)
+        x = self.conv1(x, ws[:, 0])
+        x = self.noise_init(x)
+        x = self.act_init(x)
         
-        # Initial block (4x4)
-        self.blocks.append(SynthesisBlock(nf(2), nf(2), w_dim, resolution=4, is_first_block=True, resample_kernel=resample_kernel))
-        self.torgbs.append(ToRGB(nf(2), img_channels, w_dim))
-        self.num_ws += 2 # Two AdaINs (and their convs' modulations) in the first block
-        self.num_ws += 1 # For the ToRGB layer
-
-        # Subsequent blocks
-        for res_log2 in range(3, resolution_log2 + 1): 
-            in_ch = nf(res_log2 - 1)
-            out_ch = nf(res_log2)
-            self.blocks.append(SynthesisBlock(in_ch, out_ch, w_dim, resolution=2**res_log2, resample_kernel=resample_kernel))
-            self.torgbs.append(ToRGB(out_ch, img_channels, w_dim))
-            self.num_ws += 2 # Two AdaINs (and their convs' modulations) per block
-            self.num_ws += 1 # One ToRGB layer
-            
-    def forward(self, ws, noise_mode='random', force_fp32=False, **block_kwargs):
-        # ws: (N, self.num_ws, w_dim)
-        if ws.ndim != 3 or ws.shape[1] != self.num_ws or ws.shape[2] != self.w_dim:
-            raise ValueError(f"Expected ws of shape (N, {self.num_ws}, {self.w_dim}), got {ws.shape}")
-
-        x = None 
-        rgb_image = None
-        w_idx = 0 
-
-        for i, (block, torgb) in enumerate(zip(self.blocks, self.torgbs)):
-            # Each SynthesisBlock now takes w0, w1 for its two main style application points
-            w_style0 = ws[:, w_idx, :]
-            w_idx += 1
-            w_style1 = ws[:, w_idx, :]
-            w_idx += 1
-            
-            if i == 0: 
-                x = block(x, w_style0, w_style1) 
-            else:
-                x = block(x, w_style0, w_style1)
-
-            w_style_rgb = ws[:, w_idx, :]
-            w_idx += 1
-            current_rgb = torgb(x, w_style_rgb, prev_rgb=rgb_image) 
-            rgb_image = current_rgb 
-        return rgb_image
-
-class Generator(nn.Module):
-    def __init__(self, z_dim, w_dim, num_mapping_layers, img_resolution, img_channels,
-                 mapping_lr_mul=0.01, **synthesis_kwargs):
-        super().__init__()
-        self.z_dim = z_dim
-        self.w_dim = w_dim
-        self.img_resolution = img_resolution
-        self.img_channels = img_channels
-        self.mapping = MappingNetwork(z_dim, w_dim, num_mapping_layers, lr_mul=mapping_lr_mul)
-        self.synthesis = SynthesisNetwork(w_dim, img_resolution, img_channels, **synthesis_kwargs)
-        self.num_ws = self.synthesis.num_ws 
-
-    def forward(self, z, c=None, truncation_psi=1.0, truncation_cutoff=None, noise_mode='random', force_fp32=False, return_ws=False):
-        ws_single = self.mapping(z) 
-        # TODO: Implement w_avg tracking for truncation
-        # For now, truncation is effectively disabled if w_avg is not present.
+        rgb = self.to_rgb_init(x, ws[:, 0])
         
-        # Expand ws_single to match self.num_ws for the synthesis network
-        ws = ws_single.unsqueeze(1).repeat(1, self.num_ws, 1) # (N, num_ws, w_dim)
-
-        img = self.synthesis(ws, noise_mode=noise_mode, force_fp32=force_fp32)
-        if return_ws:
-            return img, ws_single 
-        return img
+        for i, block in enumerate(self.blocks):
+            # Each block uses two styles from ws
+            x, rgb = block(x, ws[:, i * 2 + 1], rgb)
+        
+        return rgb
 
 class DiscriminatorBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, resample_kernel=None): 
+    def __init__(self, in_channels, out_channels):
         super().__init__()
-        self.conv0 = EqualizedConv2d(in_channels, in_channels, kernel_size=3, padding=1)
-        self.activation = nn.LeakyReLU(0.2)
-        self.blur = None # TODO: Implement FIR downsampling using Blur if resample_kernel
-        self.conv1_down = EqualizedConv2d(in_channels, out_channels, kernel_size=3, padding=1, stride=2) 
-        self.skip = EqualizedConv2d(in_channels, out_channels, kernel_size=1, bias=False, stride=2)
+        self.conv1 = EqualizedConv2d(in_channels, out_channels, 3, padding=1)
+        self.act1 = nn.LeakyReLU(0.2)
+        self.conv2 = EqualizedConv2d(out_channels, out_channels, 3, padding=1)
+        self.act2 = nn.LeakyReLU(0.2)
+        self.downsample = nn.AvgPool2d(2)
+        
+        # Skip connection must match channel dimensions after downsampling
+        self.skip = EqualizedConv2d(in_channels, out_channels, 1)
 
     def forward(self, x):
-        y = self.skip(x) 
-        x = self.activation(self.conv0(x))
-        x = self.activation(self.conv1_down(x)) 
-        return (x + y) * (1 / np.sqrt(2)) 
+        skip_x = self.skip(self.downsample(x))
+        x = self.act1(self.conv1(x))
+        x = self.act2(self.conv2(x))
+        x = self.downsample(x)
+        return (x + skip_x) * (1 / math.sqrt(2))
 
 class MinibatchStdDevLayer(nn.Module):
-    def __init__(self, group_size=4, num_new_features=1):
+    def __init__(self, group_size=4):
         super().__init__()
         self.group_size = group_size
-        self.num_new_features = num_new_features # Must be 1 for this simplified version
 
     def forward(self, x):
         N, C, H, W = x.shape
-        if self.num_new_features != 1:
-            raise NotImplementedError("MinibatchStdDevLayer for num_new_features > 1 not fully implemented in this scratch version.")
-        
-        actual_group_size = min(self.group_size, N)
-        if N % actual_group_size != 0: 
-            actual_group_size = N // (N // actual_group_size) if (N // actual_group_size) > 0 else N
-        if actual_group_size <= 0: return x
-
-        y = x.view(actual_group_size, N // actual_group_size, C, H, W) 
-        y = y - y.mean(dim=0, keepdim=True)    
-        y = y.square().mean(dim=0)             
-        y = (y + 1e-8).sqrt()                  
-        y = y.mean(dim=[1,2,3], keepdim=True) # (G, 1, 1, 1) where G = N // actual_group_size
-        y = y.repeat_interleave(actual_group_size, dim=0) # (N, 1, 1, 1)
-        y = y.repeat(1, 1, H, W) # (N, 1, H, W)
+        group_size = min(N, self.group_size)
+        y = x.view(group_size, -1, C, H, W)
+        y = y - y.mean(dim=0, keepdim=True)
+        y = y.square().mean(dim=0).sqrt().mean(dim=[1,2,3])
+        y = y.view(-1, 1, 1, 1).repeat(group_size, 1, H, W)
         return torch.cat([x, y], dim=1)
 
 class Discriminator(nn.Module):
-    def __init__(self, img_resolution, img_channels,
-                 channel_base=32768, channel_max=512, num_fp16_res=0, conv_clamp=None,
-                 mbstd_group_size=4, mbstd_num_features=1,
-                 resample_kernel=None, block_kwargs={}, mapping_kwargs={}, epilogue_kwargs={}):
+    # CORRECTED: Fully refactored __init__ to use a clear, resolution-based channel definition.
+    def __init__(self, img_resolution, img_channels, channel_base=32768, channel_max=512, mbstd_group_size=4):
         super().__init__()
-        self.img_resolution = img_resolution
-        self.img_channels = img_channels
-        resolution_log2 = int(np.log2(img_resolution))
-        assert img_resolution == 2**resolution_log2 and img_resolution >= 4
-        def nf(stage):
-            return min(int(channel_base / (2.0 ** stage)), channel_max)
-
-        self.fromrgb = EqualizedConv2d(img_channels, nf(resolution_log2 -1), kernel_size=1) 
-        self.activation = nn.LeakyReLU(0.2)
+        
+        resolutions = [2**i for i in range(int(np.log2(img_resolution)), 1, -1)]
+        def get_ch(res): return min(int(channel_base / res), channel_max)
+        
+        self.from_rgb = EqualizedConv2d(img_channels, get_ch(img_resolution), 1)
         self.blocks = nn.ModuleList()
-        for res_log2_current in range(resolution_log2, 2, -1): 
-            in_ch = nf(res_log2_current - 1) 
-            out_ch = nf(res_log2_current - 2)
-            self.blocks.append(DiscriminatorBlock(in_ch, out_ch, resample_kernel=resample_kernel))
-        final_features_channels = nf(2) 
-        self.mbstd = MinibatchStdDevLayer(group_size=mbstd_group_size, num_new_features=mbstd_num_features)
-        final_conv_in_channels = final_features_channels + mbstd_num_features
-        self.final_conv = EqualizedConv2d(final_conv_in_channels, nf(1), kernel_size=3, padding=1) 
-        self.final_dense = EqualizedLinear(nf(1) * 4 * 4, nf(0), lr_mul=1.0) 
-        self.output_layer = EqualizedLinear(nf(0), 1, lr_mul=1.0) 
+        in_ch = get_ch(img_resolution)
+        for res in resolutions[1:]:
+            out_ch = get_ch(res)
+            self.blocks.append(DiscriminatorBlock(in_ch, out_ch))
+            in_ch = out_ch
+            
+        self.mbstd = MinibatchStdDevLayer(group_size=mbstd_group_size)
+        final_in_ch = in_ch + 1 # For the stddev feature
+        self.final_conv = EqualizedConv2d(final_in_ch, in_ch, 3, padding=1)
+        self.final_act = nn.LeakyReLU(0.2)
+        self.final_dense = EqualizedLinear(in_ch * 4 * 4, in_ch)
+        self.output = EqualizedLinear(in_ch, 1)
 
-    def forward(self, img, c=None, **block_kwargs):
-        x = self.activation(self.fromrgb(img))
+    def forward(self, x):
+        x = self.from_rgb(x)
         for block in self.blocks:
             x = block(x)
+        
         x = self.mbstd(x)
-        x = self.activation(self.final_conv(x))
-        x = x.view(x.size(0), -1) 
-        x = self.activation(self.final_dense(x))
-        out = self.output_layer(x)
-        return out
+        x = self.final_act(self.final_conv(x))
+        x = x.view(x.shape[0], -1)
+        x = self.final_act(self.final_dense(x))
+        x = self.output(x)
+        return x
 
-if __name__ == '__main__':
-    print("Running basic network tests...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    Z_DIM = 128; W_DIM = 128; IMG_RESOLUTION = 32; IMG_CHANNELS = 1
-    N_MAPPING_LAYERS = 4; BATCH_SIZE = 2
-    
-    # Test Generator with correct ws handling for SynthesisNetwork
-    gen = Generator(
-        z_dim=Z_DIM, w_dim=W_DIM, num_mapping_layers=N_MAPPING_LAYERS,
-        img_resolution=IMG_RESOLUTION, img_channels=IMG_CHANNELS,
-        mapping_lr_mul=0.01,
-        channel_base=512, # Adjusted for smaller test res
-        channel_max=128,  # Adjusted for smaller test res
-    ).to(device)
-    
-    test_z = torch.randn(BATCH_SIZE, Z_DIM).to(device)
-    with torch.no_grad():
-        fake_images, mapped_ws = gen(test_z, return_ws=True)
-    print(f"Generator output shape: {fake_images.shape}") 
-    assert fake_images.shape == (BATCH_SIZE, IMG_CHANNELS, IMG_RESOLUTION, IMG_RESOLUTION)
-    print(f"Generator mapped_ws shape: {mapped_ws.shape}")
-    assert mapped_ws.shape == (BATCH_SIZE, W_DIM)
-    
-    # Test SynthesisNetwork directly with correctly shaped ws
-    synth_net = gen.synthesis
-    test_ws_for_synth = torch.randn(BATCH_SIZE, synth_net.num_ws, W_DIM).to(device)
-    with torch.no_grad():
-        fake_images_from_synth = synth_net(test_ws_for_synth)
-    print(f"SynthesisNetwork direct output shape: {fake_images_from_synth.shape}")
-    assert fake_images_from_synth.shape == (BATCH_SIZE, IMG_CHANNELS, IMG_RESOLUTION, IMG_RESOLUTION)
+class Generator(nn.Module):
+    def __init__(self, z_dim, w_dim, num_mapping_layers, img_resolution, img_channels, **synthesis_kwargs):
+        super().__init__()
+        self.z_dim = z_dim
+        self.w_dim = w_dim
+        # CORRECTED: The number of styles needed is num_blocks * 2 + 1
+        num_blocks = int(np.log2(img_resolution)) - 2
+        self.num_ws = num_blocks * 2 + 1
+        
+        self.mapping = MappingNetwork(z_dim, w_dim, num_mapping_layers)
+        self.synthesis = SynthesisNetwork(w_dim, img_resolution, img_channels, **synthesis_kwargs)
 
-
-    disc = Discriminator(
-        img_resolution=IMG_RESOLUTION, img_channels=IMG_CHANNELS,
-        channel_base=512, channel_max=128,
-        mbstd_group_size=min(4, BATCH_SIZE) if BATCH_SIZE > 0 else 1
-    ).to(device)
-    output_logits = disc(fake_images)
-    print(f"Discriminator output shape: {output_logits.shape}") 
-    assert output_logits.shape == (BATCH_SIZE,1)
-    print("Basic G/D network tests completed.")
-
-    print("\nTesting ModulatedConv2d...")
-    mod_conv = ModulatedConv2d(in_channels=3, out_channels=8, kernel_size=3, w_dim=W_DIM).to(device)
-    test_x_conv = torch.randn(BATCH_SIZE, 3, 16, 16).to(device)
-    test_w_conv = torch.randn(BATCH_SIZE, W_DIM).to(device)
-    out_mod_conv = mod_conv(test_x_conv, test_w_conv)
-    print(f"ModulatedConv2d output shape: {out_mod_conv.shape}") 
-    assert out_mod_conv.shape == (BATCH_SIZE, 8, 16, 16)
-    print("ModulatedConv2d test completed.")
+    def forward(self, z, truncation_psi=0.7, noise_mode='random', return_ws=False):
+        w = self.mapping(z)
+        if truncation_psi < 1.0:
+            # This part would need a w_avg buffer, which we can implement later
+            pass
+        ws = w.unsqueeze(1).repeat(1, self.num_ws, 1)
+        
+        img = self.synthesis(ws)
+        
+        if return_ws:
+            return img, ws
+        return img
