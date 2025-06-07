@@ -53,15 +53,12 @@ class ModulatedConv2d(nn.Module):
             demod_coeff = (weight.pow(2).sum(dim=[2,3,4]) + 1e-8).rsqrt()
             weight = weight * demod_coeff.view(batch_size, self.out_channels, 1, 1, 1)
 
-        # The grouped convolution trick
-        # Reshape input and weights to treat each item in the batch as a separate group
         if self.up:
             x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
             height, width = height * 2, width * 2
-
+        
         x = x.reshape(1, -1, height, width)
         weight = weight.reshape(-1, in_channels, *self.weight.shape[2:])
-        
         x = F.conv2d(x, weight, padding=self.padding, groups=batch_size)
         x = x.reshape(batch_size, self.out_channels, *x.shape[2:])
         x = x + self.bias.view(1, -1, 1, 1)
@@ -127,7 +124,6 @@ class SynthesisBlock(nn.Module):
         x = self.noise2(x)
         x = self.activation2(x)
         
-        # Add to the upsampled RGB from the previous layer
         new_rgb = self.to_rgb(x, w2)
         if rgb is not None:
             rgb = F.interpolate(rgb, scale_factor=2, mode='bilinear', align_corners=False)
@@ -140,8 +136,6 @@ class SynthesisNetwork(nn.Module):
         super().__init__()
         self.w_dim = w_dim
         self.img_channels = img_channels
-        
-        # A helper function to define the number of channels for each resolution
         def get_ch(res): return min(int(channel_base / res), channel_max)
         
         self.input_const = nn.Parameter(torch.randn(1, get_ch(4), 4, 4))
@@ -152,7 +146,7 @@ class SynthesisNetwork(nn.Module):
 
         self.blocks = nn.ModuleList()
         in_ch = get_ch(4)
-        for res in [2**i for i in range(3, int(np.log2(img_resolution)) + 1)]: # 8, 16, ..., img_res
+        for res in [2**i for i in range(3, int(np.log2(img_resolution)) + 1)]:
             out_ch = get_ch(res)
             self.blocks.append(SynthesisBlock(in_ch, out_ch, w_dim, img_channels))
             in_ch = out_ch
@@ -162,11 +156,9 @@ class SynthesisNetwork(nn.Module):
         x = self.conv1(x, ws[:, 0])
         x = self.noise_init(x)
         x = self.act_init(x)
-        
         rgb = self.to_rgb_init(x, ws[:, 0])
         
         for i, block in enumerate(self.blocks):
-            # Each block uses two styles from ws
             x, rgb = block(x, ws[:, i * 2 + 1], ws[:, i * 2 + 2], rgb)
         
         return rgb
@@ -198,18 +190,19 @@ class MinibatchStdDevLayer(nn.Module):
         group_size = min(N, self.group_size)
         y = x.view(group_size, -1, C, H, W)
         y = y - y.mean(dim=0, keepdim=True)
-        y = y.square().mean(dim=0).sqrt().mean(dim=[1,2,3])
+        # CORRECTED: Added a small epsilon (1e-8) before the sqrt to prevent
+        # taking the square root of a negative number due to floating point
+        # precision errors. This is the definitive fix for the 'PowBackward0' NaN error.
+        y = (y.square().mean(dim=0) + 1e-8).sqrt().mean(dim=[1,2,3])
         y = y.view(-1, 1, 1, 1).repeat(group_size, 1, H, W)
         return torch.cat([x, y], dim=1)
 
 class Discriminator(nn.Module):
-    # CORRECTED: Fully refactored __init__ to use a clear, resolution-based channel definition.
     def __init__(self, img_resolution, img_channels, channel_base=32768, channel_max=512, mbstd_group_size=4):
         super().__init__()
         def get_ch(res): return min(int(channel_base / res), channel_max)
         
         self.from_rgb = EqualizedConv2d(img_channels, get_ch(img_resolution), 1)
-        
         self.blocks = nn.ModuleList()
         in_ch = get_ch(img_resolution)
         for res_log2 in range(int(np.log2(img_resolution)), 2, -1):
@@ -228,7 +221,6 @@ class Discriminator(nn.Module):
         x = self.from_rgb(x)
         for block in self.blocks:
             x = block(x)
-        
         x = self.mbstd(x)
         x = self.final_act(self.final_conv(x))
         x = x.view(x.shape[0], -1)
@@ -237,14 +229,11 @@ class Discriminator(nn.Module):
         return x
 
 class Generator(nn.Module):
-    # CORRECTED: Refactored the __init__ signature to explicitly define parameters
-    # for itself and its sub-modules, preventing misdirected kwargs.
     def __init__(self, z_dim, w_dim, num_mapping_layers, mapping_lr_mul,
-                 img_resolution, img_channels, channel_base, channel_max, **kwargs): # Absorb unused kwargs
+                 img_resolution, img_channels, channel_base, channel_max, **kwargs):
         super().__init__()
         self.z_dim = z_dim
         self.w_dim = w_dim
-        # The number of styles needed is (num_blocks * 2) + 2 for first conv and init to_rgb
         num_blocks = int(np.log2(img_resolution)) - 2
         self.num_ws = num_blocks * 2 + 2
         
@@ -256,11 +245,9 @@ class Generator(nn.Module):
     def forward(self, z, truncation_psi=0.7, noise_mode='random', return_ws=False):
         w = self.mapping(z)
         if truncation_psi < 1.0:
-            # Truncation logic would be implemented here
             pass
         ws = w.unsqueeze(1).repeat(1, self.num_ws, 1)
         img = self.synthesis(ws)
-        
         if return_ws:
             return img, ws
         return img

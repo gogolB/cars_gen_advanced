@@ -29,30 +29,12 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
+        # --- Network Initialization ---
         print("Initializing From-Scratch Generator...")
-        # CORRECTED: Instantiate Generator with an explicit list of arguments
-        # from the model config to prevent TypeErrors.
-        self.G = Generator(
-            z_dim=self.hparams.model_cfg.z_dim,
-            w_dim=self.hparams.model_cfg.w_dim,
-            num_mapping_layers=self.hparams.model_cfg.num_mapping_layers,
-            mapping_lr_mul=self.hparams.model_cfg.mapping_lr_mul,
-            img_resolution=self.hparams.model_cfg.img_resolution,
-            img_channels=self.hparams.model_cfg.img_channels,
-            channel_base=self.hparams.model_cfg.channel_base,
-            channel_max=self.hparams.model_cfg.channel_max
-        )
+        self.G = Generator(**self.hparams.model_cfg)
         
         print("Initializing From-Scratch Discriminator...")
-        # CORRECTED: Instantiate Discriminator with an explicit list of arguments
-        # from the model config to prevent TypeErrors.
-        self.D = Discriminator(
-            img_resolution=self.hparams.model_cfg.img_resolution,
-            img_channels=self.hparams.model_cfg.img_channels,
-            channel_base=self.hparams.model_cfg.channel_base,
-            channel_max=self.hparams.model_cfg.channel_max,
-            mbstd_group_size=self.hparams.model_cfg.mbstd_group_size
-        )
+        self.D = Discriminator(**self.hparams.model_cfg)
 
         print("Initializing G_ema...")
         self.G_ema = copy.deepcopy(self.G).eval()
@@ -101,6 +83,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return opt_g, opt_d
 
     def on_train_start(self):
+        torch.autograd.set_detect_anomaly(True)
         if self.pl_weight > 0: self.pl_mean = self.pl_mean.to(self.device)
         if self.ada_enabled:
             self.ada_p = self.ada_p.to(self.device)
@@ -131,17 +114,18 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         if self.ada_enabled: self.ada_stats.copy_(d_real_logits.sign().mean().lerp(self.ada_stats, 0.999))
         d_loss = compute_d_loss_logistic(d_real_logits, d_fake_logits)
         self.log('d_loss/main', d_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
-        if self.r1_gamma > 0 and (self.global_step % self.d_reg_interval == 0):
+        
+        # CORRECTED: Use batch_idx for reliable periodic execution instead of global_step.
+        if self.r1_gamma > 0 and (batch_idx % self.d_reg_interval == 0):
             real_images_for_r1 = real_images_aug.detach().requires_grad_(True)
             d_real_logits_r1 = self.D(real_images_for_r1)
             r1_penalty = compute_r1_penalty(real_images_for_r1, d_real_logits_r1) * (self.r1_gamma / 2) * self.d_reg_interval
             if not torch.isnan(r1_penalty).any():
                 d_loss += r1_penalty
                 self.log('d_loss/r1', r1_penalty, on_step=True, batch_size=current_batch_size)
+        
         self.manual_backward(d_loss)
-        
         self.clip_gradients(opt_d, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
-        
         opt_d.step()
         
         # --- G loss ---
@@ -153,21 +137,27 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         d_fake_logits_g = self.D(fake_images_g_aug)
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
         self.log('g_loss/main', g_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
-        if self.pl_weight > 0 and (self.global_step % self.g_reg_interval == 0):
+        
+        # CORRECTED: Use batch_idx for reliable periodic execution instead of global_step.
+        if self.pl_weight > 0 and (batch_idx % self.g_reg_interval == 0):
             pl_z = torch.randn(current_batch_size // 2, self.G.z_dim, device=self.device)
             ws_pl_single = self.G.mapping(pl_z)
             ws_pl_broadcasted = ws_pl_single.unsqueeze(1).repeat(1, self.G.num_ws, 1)
             path_lengths = calculate_path_lengths(ws_pl_broadcasted, self.G.synthesis)
-            pl_penalty = (path_lengths - self.pl_mean).square()
-            self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
-            pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
-            if not torch.isnan(pl_loss).any():
-                g_loss += pl_loss
-                self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
+            
+            if not torch.isnan(path_lengths).any():
+                self.log('g_loss/raw_path_length', path_lengths.mean(), on_step=True, batch_size=current_batch_size)
+                pl_penalty = (path_lengths - self.pl_mean).square()
+                self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
+                pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
+                if not torch.isnan(pl_loss).any():
+                    g_loss += pl_loss
+                    self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
+            else:
+                 self.log('g_loss/path_length_nan_skipped', 1.0, on_step=True, batch_size=current_batch_size)
+
         self.manual_backward(g_loss)
-        
         self.clip_gradients(opt_g, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
-        
         opt_g.step()
 
         # --- EMA Update ---
