@@ -27,25 +27,21 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
                  batch_size: int
                 ):
         super().__init__()
-        # CORRECTED: Use save_hyperparameters() without arguments.
-        # This correctly saves model_cfg, training_cfg, and batch_size
-        # as attributes of self.hparams, e.g., self.hparams.model_cfg
         self.save_hyperparameters()
 
         # --- Network Initialization ---
         print("Initializing From-Scratch Generator...")
-        # CORRECTED: Access kwargs through self.hparams.model_cfg
         self.G = Generator(**self.hparams.model_cfg.generator_kwargs)
         
         print("Initializing From-Scratch Discriminator...")
-        # CORRECTED: Access kwargs through self.hparams.model_cfg
         self.D = Discriminator(**self.hparams.model_cfg.discriminator_kwargs)
 
         print("Initializing G_ema...")
         self.G_ema = copy.deepcopy(self.G).eval()
+        for param in self.G_ema.parameters():
+            param.requires_grad = False
         
         # --- EMA Parameters ---
-        # Access to training_cfg remains the same and is correct.
         self.ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
         
         # --- Loss and Regularization Parameters ---
@@ -59,7 +55,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.register_buffer('pl_mean', torch.zeros([]))
 
         # --- AugmentPipe Initialization ---
-        # CORRECTED: Access kwargs through self.hparams.model_cfg
         if self.hparams.model_cfg.get('augment_pipe_kwargs'):
             print("Initializing AugmentPipe (from-scratch, ADA-ready)...")
             self.augment_pipe = AugmentPipe(self.hparams.model_cfg.augment_pipe_kwargs)
@@ -90,7 +85,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         print("StyleGAN2ScratchLightningModule initialized.")
 
     def configure_optimizers(self):
-        # This implementation remains correct.
         g_params = list(self.G.parameters()) 
         d_params = list(self.D.parameters())
         g_lr = self.hparams.training_cfg.g_lr
@@ -101,7 +95,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return opt_g, opt_d
 
     def on_train_start(self):
-        # This implementation remains correct.
         if self.pl_weight > 0: self.pl_mean = self.pl_mean.to(self.device)
         if self.ada_enabled:
             self.ada_p = self.ada_p.to(self.device)
@@ -113,7 +106,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return self.G_ema(z, c=c, truncation_psi=truncation_psi, noise_mode=noise_mode, return_ws=return_ws)
 
     def training_step(self, batch, batch_idx):
-        # This implementation remains correct.
         opt_g, opt_d = self.optimizers() 
         real_images, _ = batch 
         current_batch_size = real_images.shape[0]
@@ -124,10 +116,11 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         self.G.requires_grad_(False)
         self.D.requires_grad_(True)
         opt_d.zero_grad(set_to_none=True)
-        z = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
-        fake_images = self.G(z)
+        z_d = torch.randn(current_batch_size, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
+        with torch.no_grad():
+            fake_images_d = self.G(z_d)
         real_images_aug = self.augment_pipe(real_images, p=current_p) if self.augment_pipe else real_images
-        fake_images_aug = self.augment_pipe(fake_images.detach(), p=current_p) if self.augment_pipe else fake_images.detach()
+        fake_images_aug = self.augment_pipe(fake_images_d, p=current_p) if self.augment_pipe else fake_images_d
         d_real_logits = self.D(real_images_aug)
         d_fake_logits = self.D(fake_images_aug)
         if self.ada_enabled:
@@ -148,14 +141,14 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         self.G.requires_grad_(True)
         self.D.requires_grad_(False)
         opt_g.zero_grad(set_to_none=True)
-        z = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
-        fake_images_g, ws_g = self.G(z, return_ws=True)
+        z_g = torch.randn(current_batch_size, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
+        fake_images_g, ws_g = self.G(z_g, return_ws=True)
         fake_images_g_aug = self.augment_pipe(fake_images_g, p=current_p) if self.augment_pipe else fake_images_g
         d_fake_logits_g = self.D(fake_images_g_aug)
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
         self.log('g_loss/main', g_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
         if self.pl_weight > 0 and (self.global_step % self.g_reg_interval == 0):
-            pl_z = torch.randn(current_batch_size // 2, self.G.z_dim, device=self.device)
+            pl_z = torch.randn(current_batch_size // 2, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
             ws_pl = self.G.mapping(pl_z)
             path_lengths = calculate_path_lengths(ws_pl.unsqueeze(1).repeat(1, self.G.num_ws, 1), self.G.synthesis)
             pl_penalty = (path_lengths - self.pl_mean).square()
@@ -164,23 +157,32 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             if not torch.isnan(pl_loss).any():
                 g_loss += pl_loss
                 self.log('g_loss/pl', pl_loss, on_step=True, batch_size=current_batch_size)
-                self.log('g_loss/pl_mean', self.pl_mean, on_step=True, batch_size=current_batch_size)
         self.manual_backward(g_loss)
         opt_g.step()
 
         # --- EMA Update ---
-        world_size = self.trainer.world_size
-        self.cur_nimg += current_batch_size * world_size
-        ema_nimg = self.ema_kimg * 1000
-        beta = 0.5 ** ((current_batch_size * world_size) / max(ema_nimg, 1e-8))
-        for p_ema, p_main in zip(self.G_ema.parameters(), self.G.parameters()):
-            p_ema.copy_(p_main.detach().lerp(p_ema, beta))
-        for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
-            b_ema.copy_(b_main.detach())
+        # CORRECTED: Wrap the entire EMA update in a no_grad() context
+        # to prevent in-place modification errors on variables that require gradients.
+        with torch.no_grad():
+            world_size = self.trainer.world_size if self.trainer else 1
+            self.cur_nimg += current_batch_size * world_size
+            ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
+            ema_nimg = ema_kimg * 1000
+            
+            # The 'beta' for the EMA decay, calculated based on kimg.
+            beta = 0.5 ** ((current_batch_size * world_size) / max(ema_nimg, 1e-8))
+            
+            # Update main generator parameters
+            for p_ema, p_main in zip(self.G_ema.parameters(), self.G.parameters()):
+                # Explicitly calculate the new value and use .copy_() for the update.
+                p_ema.copy_(p_main.lerp(p_ema, beta))
+                
+            # Update generator buffers
+            for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
+                b_ema.copy_(b_main)
+
         self.log('progress/kimg', self.cur_nimg / 1000.0, on_step=True, rank_zero_only=True, batch_size=current_batch_size)
     
-    # --- on_train_batch_end and generate_and_log_samples remain the same ---
-    # They are already correct.
     def on_train_batch_end(self, outputs, batch: any, batch_idx: int) -> None:
         if self.ada_enabled and self.cur_nimg >= self.last_ada_update_nimg + self.ada_interval:
             self.last_ada_update_nimg = self.cur_nimg
@@ -192,7 +194,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             kimg_per_tick = self.hparams.training_cfg.get('kimg_per_tick', 4)
             snapshot_ticks = self.hparams.training_cfg.get('snapshot_ticks', 10)
             snapshot_interval_kimg = kimg_per_tick * snapshot_ticks
-            if snapshot_interval_kimg > 0 and (self.cur_nimg // 1000) % snapshot_interval_kimg == 0 and batch_idx == 0:
+            if snapshot_interval_kimg > 0 and (self.cur_nimg // 1000) > 0 and (self.cur_nimg // 1000) % snapshot_interval_kimg == 0 and batch_idx == 0:
                 self.generate_and_log_samples()
 
     @torch.no_grad()
@@ -202,7 +204,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.image_snapshot_dir = os.path.join(self.logger.log_dir, "image_snapshots")
             os.makedirs(self.image_snapshot_dir, exist_ok=True)
         current_kimg = self.cur_nimg // 1000
-        z = torch.randn(self.hparams.training_cfg.nimg_snapshot, self.G.z_dim, device=self.device)
+        z = torch.randn(self.hparams.training_cfg.nimg_snapshot, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
         samples = self.G_ema(z).cpu()
         samples = (samples + 1) / 2.0
         grid = torchvision.utils.make_grid(samples)
