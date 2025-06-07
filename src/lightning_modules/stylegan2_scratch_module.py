@@ -133,7 +133,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             d_real_logits_r1 = self.D(real_images_for_r1)
             r1_penalty = compute_r1_penalty(real_images_for_r1, d_real_logits_r1) * (self.r1_gamma / 2) * self.d_reg_interval
             
-            # CORRECTED: Added diagnostic logging for NaN penalties.
             if not torch.isnan(r1_penalty).any():
                 d_loss += r1_penalty
                 self.log('d_loss/r1', r1_penalty, on_step=True, batch_size=current_batch_size)
@@ -156,14 +155,18 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         
         if self.pl_weight > 0 and (self.global_step % self.g_reg_interval == 0):
             pl_z = torch.randn(current_batch_size // 2, self.hparams.model_cfg.generator_kwargs.z_dim, device=self.device)
-            ws_pl = self.G.mapping(pl_z)
-            # Note: Path length regularization in the original paper is calculated on w, not w_broadcasted
-            path_lengths = calculate_path_lengths(ws_pl, self.G.synthesis)
+            # Get the single mapped ws
+            ws_pl_single = self.G.mapping(pl_z)
+
+            # CORRECTED: Restore the broadcasting of the latent vector to the expected shape.
+            # This is crucial for the path length regularization calculation.
+            ws_pl_broadcasted = ws_pl_single.unsqueeze(1).repeat(1, self.G.num_ws, 1)
+
+            path_lengths = calculate_path_lengths(ws_pl_broadcasted, self.G.synthesis)
             pl_penalty = (path_lengths - self.pl_mean).square()
             self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
             pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
             
-            # CORRECTED: Added diagnostic logging for NaN penalties and restored pl_mean logging.
             if not torch.isnan(pl_loss).any():
                 g_loss += pl_loss
                 self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
