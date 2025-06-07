@@ -1,19 +1,40 @@
-    # configs/main_config.yaml
-    defaults:
-      - _self_ 
-      - data: cars_stylegan_data_default # Keep using the same data setup
-      - model: stylegan2_scratch_256    # New: Point to our from-scratch model config
-      - training: scratch_default_training # New: Point to training config for scratch model
-      - evaluation: default_evaluation 
-      - override hydra/job_logging: default 
-      - override hydra/hydra_logging: default 
+# configs/main_config.yaml
+defaults:
+  - _self_ 
+  - data: cars_stylegan_data_default # Keep using the same data setup
+  - model: stylegan2_scratch_256    # New: Point to our from-scratch model config
+  - training: scratch_default_training # New: Point to training config for scratch model
+  - evaluation: default_evaluation 
+  - override hydra/job_logging: default 
+  - override hydra/hydra_logging: default 
 
-    project_name: "cars_gen_scratch_stylegan" # Updated project name for clarity
-    seed: 42
+project_name: "cars_gen_scratch_stylegan" # Updated project name for clarity
+seed: 42
 
-    project_root: "." # Should be the root of 'cars_gen_advanced'
+project_root: "." # Should be the root of 'cars_gen_advanced'
 
-    tags: ["stylegan2_scratch", "cars_thyroid", "initial_from_scratch_run"]
-    notes: "Initial from-scratch StyleGAN2 implementation for CARS thyroid dataset."
+tags: ["stylegan2_scratch", "cars_thyroid", "initial_from_scratch_run"]
+notes: "Initial from-scratch StyleGAN2 implementation for CARS thyroid dataset."
+
+# --- PyTorch Lightning Logger Configuration ---
+# This section centralizes all settings for the TensorBoardLogger.
+# It ensures that logs are saved in a predictable and organized manner.
+logger:
+  _target_: pytorch_lightning.loggers.TensorBoardLogger
+  save_dir: "${project_root}/outputs/" # CORRECTED: Base directory for all logs and outputs
+  name: "${project_name}"             # Subdirectory for this specific project
+  # version will be automatically generated as 'version_0', 'version_1', etc.
+  # The final log path will be: ./outputs/cars_gen_scratch_stylegan/version_X
+
+# --- Hydra Configuration ---
+# This section controls how Hydra manages its own output directories.
+hydra:
+  run:
+    # This sets the output directory for Hydra's own logs and configs.
+    # It will be inside the TensorBoard logger's directory for easy access.
+    dir: ${logger.save_dir}/${logger.name}/runs/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${logger.save_dir}/${logger.name}/multirun/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num}
 
     
