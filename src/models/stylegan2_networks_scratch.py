@@ -53,12 +53,15 @@ class ModulatedConv2d(nn.Module):
             demod_coeff = (weight.pow(2).sum(dim=[2,3,4]) + 1e-8).rsqrt()
             weight = weight * demod_coeff.view(batch_size, self.out_channels, 1, 1, 1)
 
+        # The grouped convolution trick
+        # Reshape input and weights to treat each item in the batch as a separate group
         if self.up:
             x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-        
-        # Reshape for grouped convolution
-        x = x.reshape(1, -1, height * 2 if self.up else height, width * 2 if self.up else width)
+            height, width = height * 2, width * 2
+
+        x = x.reshape(1, -1, height, width)
         weight = weight.reshape(-1, in_channels, *self.weight.shape[2:])
+        
         x = F.conv2d(x, weight, padding=self.padding, groups=batch_size)
         x = x.reshape(batch_size, self.out_channels, *x.shape[2:])
         x = x + self.bias.view(1, -1, 1, 1)
@@ -115,28 +118,30 @@ class SynthesisBlock(nn.Module):
         
         self.to_rgb = ToRGBLayer(out_channels, img_channels, w_dim)
 
-    def forward(self, x, w, rgb):
-        x = self.conv1(x, w)
+    def forward(self, x, w1, w2, rgb):
+        x = self.conv1(x, w1)
         x = self.noise1(x)
         x = self.activation1(x)
         
-        x = self.conv2(x, w)
+        x = self.conv2(x, w2)
         x = self.noise2(x)
         x = self.activation2(x)
         
-        new_rgb = self.to_rgb(x, w)
+        # Add to the upsampled RGB from the previous layer
+        new_rgb = self.to_rgb(x, w2)
         if rgb is not None:
-            new_rgb = F.interpolate(rgb, scale_factor=2, mode='bilinear', align_corners=False) + new_rgb
+            rgb = F.interpolate(rgb, scale_factor=2, mode='bilinear', align_corners=False)
+            new_rgb = new_rgb + rgb
+        
         return x, new_rgb
 
 class SynthesisNetwork(nn.Module):
-    # CORRECTED: Fully refactored __init__ to use a clear, resolution-based channel definition.
     def __init__(self, w_dim, img_resolution, img_channels, channel_base=32768, channel_max=512):
         super().__init__()
         self.w_dim = w_dim
         self.img_channels = img_channels
         
-        resolutions = [2**i for i in range(2, int(np.log2(img_resolution)) + 1)]
+        # A helper function to define the number of channels for each resolution
         def get_ch(res): return min(int(channel_base / res), channel_max)
         
         self.input_const = nn.Parameter(torch.randn(1, get_ch(4), 4, 4))
@@ -147,13 +152,12 @@ class SynthesisNetwork(nn.Module):
 
         self.blocks = nn.ModuleList()
         in_ch = get_ch(4)
-        for res in resolutions[1:]: # from 8x8 up to target resolution
+        for res in [2**i for i in range(3, int(np.log2(img_resolution)) + 1)]: # 8, 16, ..., img_res
             out_ch = get_ch(res)
             self.blocks.append(SynthesisBlock(in_ch, out_ch, w_dim, img_channels))
             in_ch = out_ch
 
     def forward(self, ws):
-        # ws should have shape [N, num_blocks*2 + 1, w_dim]
         x = self.input_const.repeat(ws.shape[0], 1, 1, 1)
         x = self.conv1(x, ws[:, 0])
         x = self.noise_init(x)
@@ -163,7 +167,7 @@ class SynthesisNetwork(nn.Module):
         
         for i, block in enumerate(self.blocks):
             # Each block uses two styles from ws
-            x, rgb = block(x, ws[:, i * 2 + 1], rgb)
+            x, rgb = block(x, ws[:, i * 2 + 1], ws[:, i * 2 + 2], rgb)
         
         return rgb
 
@@ -175,8 +179,6 @@ class DiscriminatorBlock(nn.Module):
         self.conv2 = EqualizedConv2d(out_channels, out_channels, 3, padding=1)
         self.act2 = nn.LeakyReLU(0.2)
         self.downsample = nn.AvgPool2d(2)
-        
-        # Skip connection must match channel dimensions after downsampling
         self.skip = EqualizedConv2d(in_channels, out_channels, 1)
 
     def forward(self, x):
@@ -204,20 +206,19 @@ class Discriminator(nn.Module):
     # CORRECTED: Fully refactored __init__ to use a clear, resolution-based channel definition.
     def __init__(self, img_resolution, img_channels, channel_base=32768, channel_max=512, mbstd_group_size=4):
         super().__init__()
-        
-        resolutions = [2**i for i in range(int(np.log2(img_resolution)), 1, -1)]
         def get_ch(res): return min(int(channel_base / res), channel_max)
         
         self.from_rgb = EqualizedConv2d(img_channels, get_ch(img_resolution), 1)
+        
         self.blocks = nn.ModuleList()
         in_ch = get_ch(img_resolution)
-        for res in resolutions[1:]:
-            out_ch = get_ch(res)
+        for res_log2 in range(int(np.log2(img_resolution)), 2, -1):
+            out_ch = get_ch(2**(res_log2-1))
             self.blocks.append(DiscriminatorBlock(in_ch, out_ch))
             in_ch = out_ch
             
         self.mbstd = MinibatchStdDevLayer(group_size=mbstd_group_size)
-        final_in_ch = in_ch + 1 # For the stddev feature
+        final_in_ch = in_ch + 1
         self.final_conv = EqualizedConv2d(final_in_ch, in_ch, 3, padding=1)
         self.final_act = nn.LeakyReLU(0.2)
         self.final_dense = EqualizedLinear(in_ch * 4 * 4, in_ch)
@@ -236,24 +237,28 @@ class Discriminator(nn.Module):
         return x
 
 class Generator(nn.Module):
-    def __init__(self, z_dim, w_dim, num_mapping_layers, img_resolution, img_channels, **synthesis_kwargs):
+    # CORRECTED: Refactored the __init__ signature to explicitly define parameters
+    # for itself and its sub-modules, preventing misdirected kwargs.
+    def __init__(self, z_dim, w_dim, num_mapping_layers, mapping_lr_mul,
+                 img_resolution, img_channels, channel_base, channel_max, **kwargs): # Absorb unused kwargs
         super().__init__()
         self.z_dim = z_dim
         self.w_dim = w_dim
-        # CORRECTED: The number of styles needed is num_blocks * 2 + 1
+        # The number of styles needed is (num_blocks * 2) + 2 for first conv and init to_rgb
         num_blocks = int(np.log2(img_resolution)) - 2
-        self.num_ws = num_blocks * 2 + 1
+        self.num_ws = num_blocks * 2 + 2
         
-        self.mapping = MappingNetwork(z_dim, w_dim, num_mapping_layers)
-        self.synthesis = SynthesisNetwork(w_dim, img_resolution, img_channels, **synthesis_kwargs)
+        self.mapping = MappingNetwork(z_dim, w_dim, num_mapping_layers, lr_mul=mapping_lr_mul)
+        self.synthesis = SynthesisNetwork(w_dim, img_resolution, img_channels, 
+                                          channel_base=channel_base, 
+                                          channel_max=channel_max)
 
     def forward(self, z, truncation_psi=0.7, noise_mode='random', return_ws=False):
         w = self.mapping(z)
         if truncation_psi < 1.0:
-            # This part would need a w_avg buffer, which we can implement later
+            # Truncation logic would be implemented here
             pass
         ws = w.unsqueeze(1).repeat(1, self.num_ws, 1)
-        
         img = self.synthesis(ws)
         
         if return_ws:
