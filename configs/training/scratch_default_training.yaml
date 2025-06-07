@@ -11,6 +11,8 @@ g_lr: 0.0025
 d_lr: 0.0025
 adam_betas: [0.0, 0.99]
 adam_eps: 1.0e-8
+accelerator: auto # CORRECTED: Added accelerator setting for PyTorch Lightning
+devices: auto
 
 # --- Regularization Settings ---
 # R1 Regularization
@@ -45,3 +47,4 @@ ada_kwargs:
                   # It defines the speed of adjustment. A higher value means slower adjustment.
                   # 500 is a reasonable starting point.
 
+log_every_n_steps: 2 # Log every 50 steps
