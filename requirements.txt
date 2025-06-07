@@ -1,0 +1,40 @@
+# Python package dependencies will be listed here
+# Core ML Frameworks
+torch # Or a specific version compatible with your CUDA, e.g., torch==1.12.1+cu113
+torchvision # Match with torch version
+pytorch-lightning # Or a more recent stable version
+
+# Configuration Management
+hydra-core>=1.2.0
+omegaconf>=2.2.0
+
+#Data Handling and Image Processing
+opencv-python>=4.5.0 # For cv2
+numpy>=1.20.0
+scikit-image>=0.18.0 # For shannon_entropy
+pandas>=1.3.0 # For reading CSV reports
+
+#Utilities
+tqdm>=4.60.0 # For progress bars
+matplotlib>=3.4.0 # For plotting in notebooks
+
+#StyleGAN2-ADA specific dependencies (refer to their official repo for exact versions if needed)
+#These are often low-level or build related.
+#The StyleGAN2-ADA repo might have its own environment.yml or requirements.
+#Common ones that might be needed for its custom ops if not pre-built:
+ninja # For custom CUDA kernel compilation
+psutil # Often used by dnnlib for system utilities
+
+#For Jupyter Notebooks (if used for review/analysis)
+jupyterlab>=3.0.0
+ipywidgets>=7.6.0 # For potential interactive elements in notebooks
+
+click
+imageio
+scipy
+Pillow 
+#Adding some of these common ones:
+click>=7.0
+imageio>=2.9.0
+scipy>=1.7.0
+Pillow>=8.3.0

@@ -1,0 +1,19 @@
+    # configs/main_config.yaml
+    defaults:
+      - _self_ 
+      - data: cars_stylegan_data_default # Keep using the same data setup
+      - model: stylegan2_scratch_256    # New: Point to our from-scratch model config
+      - training: scratch_default_training # New: Point to training config for scratch model
+      - evaluation: default_evaluation 
+      - override hydra/job_logging: default 
+      - override hydra/hydra_logging: default 
+
+    project_name: "cars_gen_scratch_stylegan" # Updated project name for clarity
+    seed: 42
+
+    project_root: "." # Should be the root of 'cars_gen_advanced'
+
+    tags: ["stylegan2_scratch", "cars_thyroid", "initial_from_scratch_run"]
+    notes: "Initial from-scratch StyleGAN2 implementation for CARS thyroid dataset."
+
+    

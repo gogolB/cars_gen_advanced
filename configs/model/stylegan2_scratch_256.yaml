@@ -1,0 +1,40 @@
+# configs/model/stylegan2_scratch_256.yaml
+
+_target_: src.lightning_modules.stylegan2_scratch_module.StyleGAN2ScratchLightningModule
+
+# --- AugmentPipe Configuration ---
+# These kwargs will be passed to the AugmentPipe constructor.
+augment_pipe_kwargs:
+  enabled: true # Set to true to use the AugmentPipe
+  # Individual probabilities for each augmentation
+  p_xflip: 0.5
+  p_rotate90: 0.5
+  p_brightness: 0.5
+  p_contrast: 0.5
+  # Parameter ranges for color augmentations
+  brightness_range: [-0.2, 0.2]
+  contrast_range: [0.8, 1.2]
+
+
+# --- Generator Configuration ---
+generator_kwargs:
+  z_dim: 512
+  w_dim: 512
+  num_mapping_layers: 8
+  img_resolution: 256
+  img_channels: 1 # Grayscale CARS images
+  mapping_lr_mul: 0.01
+  # SynthesisNetwork kwargs
+  channel_base: 16384 
+  channel_max: 512
+  resample_kernel: [1,3,3,1]
+
+# --- Discriminator Configuration ---
+discriminator_kwargs:
+  img_resolution: 256
+  img_channels: 1
+  channel_base: 16384 
+  channel_max: 512
+  mbstd_group_size: 4 
+  mbstd_num_features: 1
+  resample_kernel: [1,3,3,1]

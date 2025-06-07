@@ -1,0 +1,43 @@
+# configs/data/cars_stylegan_data_default.yaml
+
+_target_: src.datamodules.CARSStyleGANDataModule
+
+manifest_path: "data/data_validation_reports/dataset_validation_report_cleaned.csv"
+# project_root will be taken from main_config.yaml's project_root
+project_root: ${project_root} 
+
+image_size: [256, 256] # Target resolution for StyleGAN (e.g., 256, 512)
+num_channels: 1        # Grayscale CARS images
+output_range: [-1.0, 1.0] # Scale images to this range for StyleGAN (common practice)
+
+preprocessing_cfg:
+  apply_per_image_percentile_norm: true
+  norm_perc_low: 1.0
+  norm_perc_high: 99.0
+
+# Augmentations defined here are applied *before* StyleGAN's internal ADA.
+# For StyleGAN2-ADA, it's often best to keep these minimal, primarily for resizing.
+# ADA will handle more complex geometric and color augmentations adaptively.
+# If using a StyleGAN version without ADA, more augmentations might be needed here.
+train_aug_cfgs:
+  - _target_: albumentations.Resize
+    height: ${data.image_size[0]}
+    width: ${data.image_size[1]}
+    interpolation: 1 # cv2.INTER_LINEAR (1)
+  # - _target_: albumentations.HorizontalFlip # Example: ADA might handle this better
+  #   p: 0.5
+  - _target_: albumentations.pytorch.ToTensorV2 # Must be last if other A. transforms are used
+
+val_aug_cfgs: # Usually same as train for GANs if a val set is used for FID monitoring
+  - _target_: albumentations.Resize
+    height: ${data.image_size[0]}
+    width: ${data.image_size[1]}
+    interpolation: 1
+  - _target_: albumentations.pytorch.ToTensorV2
+
+batch_size: 16 # Adjust based on GPU memory and StyleGAN version recommendations
+num_workers: 4
+pin_memory: true
+val_split_ratio: 0.0 # StyleGAN often trained on all available data. FID on a fixed real set.
+seed: ${seed}
+

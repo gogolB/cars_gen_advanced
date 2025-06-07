@@ -1,0 +1,58 @@
+# configs/model/stylegan2_ada_256.yaml
+
+_target_: src.lightning_modules.stylegan2_ada_module.StyleGAN2ADALightningModule
+
+# Common parameters
+resolution: 256
+img_channels: 1 # Grayscale CARS images
+
+# Generator (G) parameters
+z_dim: 512
+w_dim: 512
+mapping_kwargs: 
+  num_layers: 8
+
+synthesis_kwargs: 
+  channel_base: 16384 
+  channel_max: 512
+  num_fp16_res: 0 
+  conv_clamp: null 
+
+# Discriminator (D) parameters
+discriminator_kwargs: 
+  channel_base: 16384 
+  channel_max: 512
+  num_fp16_res: 0 
+  conv_clamp: null 
+  epilogue_kwargs: 
+    mbstd_group_size: 4 
+
+# Augmentation pipeline (ADA) parameters
+# For CPU testing, disable ALL geometric augmentations.
+# Color augmentations should be fine.
+augment_kwargs:
+  xflip: 0      # Disabled for CPU test
+  rotate90: 0   # Disabled for CPU test
+  xint: 0       
+  scale: 0      
+  rotate: 0     
+  aniso: 0      
+  xfrac: 0      
+  brightness: 1 # Keep color augs
+  contrast: 1   # Keep color augs
+  lumaflip: 0   
+  hue: 0        
+  saturation: 0 
+
+# Loss function parameters
+loss_kwargs:
+  blur_init_sigma: 0 
+  blur_fade_kimg: 0  
+  style_mixing_prob: 0.9 
+  pl_batch_shrink: 2   
+
+# Path to the StyleGAN2-ADA PyTorch codebase
+stylegan2_ada_pytorch_path: "nvlabs/stylegan2-ada-pytorch"
+
+# Transfer learning / Pretrained model path (optional)
+# resume_from_checkpoint: null 

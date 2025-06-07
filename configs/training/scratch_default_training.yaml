@@ -1,0 +1,46 @@
+# configs/training/scratch_default_training.yaml
+
+# PyTorch Lightning Trainer settings
+accelerator: "auto" # Set to "cpu" or "mps" for local testing if needed
+devices: "auto" 
+max_epochs: -1 # We use total_kimg / max_steps
+
+# Optimizer settings (for G and D)
+g_lr: 0.002 
+d_lr: 0.002
+adam_betas: [0.0, 0.99] # Common for StyleGAN
+adam_eps: 1.0e-8
+
+# Regularization
+r1_gamma: 10.0 # R1 gradient penalty strength
+d_reg_interval: 16  # Apply R1 every N discriminator steps
+
+# --- Path Length Regularization (PLR) ---
+# Set pl_weight > 0 to enable PLR.
+pl_weight: 2.0      # Path length regularization strength.
+g_reg_interval: 4   # Apply PLR every N generator steps.
+pl_decay: 0.01      # Moving average decay for PLR.
+
+# EMA (Exponential Moving Average for Generator)
+ema_kimg: 10.0           
+ema_rampup_ratio: null   
+ema_beta: 0.999          
+
+# ADA (Adaptive Discriminator Augmentation) - Not implemented in scratch module yet
+ada_target: null 
+ada_interval: 4  
+ada_kimg: 500    
+
+# Training duration & logging
+total_kimg: 1000  
+kimg_per_tick: 4   
+log_every_n_steps: 50 
+
+# Snapshots (image grids)
+nimg_snapshot: 16       
+snapshot_ticks: 10      
+                            
+# Checkpointing (model weights)
+# checkpoint_every_n_train_steps: null # Calculated in train.py based on kimg_per_tick
+
+precision: "32-true" 

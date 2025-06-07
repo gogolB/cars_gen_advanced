@@ -1,0 +1,24 @@
+# configs/evaluation/default_evaluation.yaml
+
+# Placeholder for evaluation settings.
+# These will be used by evaluation scripts or callbacks.
+
+# Metrics to compute (examples, actual computation happens in code)
+calculate_fid: true
+fid_reals_path: null # Path to directory of real images for FID (can be set at runtime)
+fid_num_fakes: 1000  # Number of fakes to generate for FID calculation
+
+calculate_lpips: true # For diversity or comparison
+lpips_num_samples_diversity: 100
+
+calculate_ppl: true # For StyleGAN
+ppl_num_samples: 16
+ppl_space: 'w' # 'z' or 'w'
+ppl_crop: true
+
+# Settings for generating sample images during/after training
+generate_samples_on_completion: true
+num_samples_to_generate: 64
+grid_rows: 8
+
+# Add other evaluation-specific parameters here as needed.
