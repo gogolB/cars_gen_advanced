@@ -1,46 +1,47 @@
 # configs/training/scratch_default_training.yaml
 
-# PyTorch Lightning Trainer settings
-accelerator: "auto" # Set to "cpu" or "mps" for local testing if needed
-devices: "auto" 
-max_epochs: -1 # We use total_kimg / max_steps
+# This is the training configuration for the from-scratch StyleGAN2 model.
 
-# Optimizer settings (for G and D)
-g_lr: 0.002 
-d_lr: 0.002
-adam_betas: [0.0, 0.99] # Common for StyleGAN
+# --- General Training Hyperparameters ---
+total_kimg: 25000
+kimg_per_tick: 4
+snapshot_ticks: 10
+nimg_snapshot: 16
+g_lr: 0.0025
+d_lr: 0.0025
+adam_betas: [0.0, 0.99]
 adam_eps: 1.0e-8
 
-# Regularization
-r1_gamma: 10.0 # R1 gradient penalty strength
-d_reg_interval: 16  # Apply R1 every N discriminator steps
+# --- Regularization Settings ---
+# R1 Regularization
+r1_gamma: 5.0 # Scaled by img_resolution^2 / batch_size in the NVIDIA code. 
+              # A static value like 5.0 is a reasonable starting point.
+d_reg_interval: 16
 
-# --- Path Length Regularization (PLR) ---
-# Set pl_weight > 0 to enable PLR.
-pl_weight: 2.0      # Path length regularization strength.
-g_reg_interval: 4   # Apply PLR every N generator steps.
-pl_decay: 0.01      # Moving average decay for PLR.
+# Path Length Regularization (PLR)
+pl_weight: 2.0
+g_reg_interval: 4
+pl_decay: 0.01
 
-# EMA (Exponential Moving Average for Generator)
-ema_kimg: 10.0           
-ema_rampup_ratio: null   
-ema_beta: 0.999          
+# --- EMA Settings ---
+ema_kimg: 10.0
+ema_rampup_ratio: 0.05 # Ramp up over this fraction of total training time.
+ema_beta: 0.999 # The fixed beta used if rampup is disabled.
 
-# ADA (Adaptive Discriminator Augmentation) - Not implemented in scratch module yet
-ada_target: null 
-ada_interval: 4  
-ada_kimg: 500    
+# --- Adaptive Discriminator Augmentation (ADA) Settings ---
+# These parameters control the feedback loop for adjusting the augmentation probability 'p'.
+ada_kwargs:
+  # The target sign of the discriminator output on the validation set.
+  # A common value is 0.6. The controller will adjust 'p' to keep the metric around this value.
+  target_rt: 0.6
+  
+  # How often (in kimg) to check the discriminator's overfitting metric and adjust 'p'.
+  # Every 4 kimg (4000 images) is a standard interval.
+  interval_kimg: 4
+  
+  # How fast to adjust 'p'. This is the step size.
+  # A value of 5e-5 means p is adjusted by 0.00005 * (num_images_in_interval).
+  speed_kimg: 500 # This is the kimg version of the original paper's "ada_kimg" parameter.
+                  # It defines the speed of adjustment. A higher value means slower adjustment.
+                  # 500 is a reasonable starting point.
 
-# Training duration & logging
-total_kimg: 1000  
-kimg_per_tick: 4   
-log_every_n_steps: 50 
-
-# Snapshots (image grids)
-nimg_snapshot: 16       
-snapshot_ticks: 10      
-                            
-# Checkpointing (model weights)
-# checkpoint_every_n_train_steps: null # Calculated in train.py based on kimg_per_tick
-
-precision: "32-true" 
