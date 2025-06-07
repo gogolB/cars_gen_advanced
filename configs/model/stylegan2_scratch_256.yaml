@@ -1,7 +1,5 @@
 # configs/model/stylegan2_scratch_256.yaml
 
-# This config now has a flat structure that matches the new __init__ signatures
-# in the network definitions.
 _target_: src.lightning_modules.stylegan2_scratch_module.StyleGAN2ScratchLightningModule
 
 model_cfg:
@@ -14,7 +12,7 @@ model_cfg:
   # --- Synthesis Network Parameters ---
   channel_base: 16384
   channel_max: 512
-  resample_kernel: [1,3,3,1]
+  # CORRECTED: Removed resample_kernel as it's no longer used in the refactored networks.
 
   # --- Discriminator Parameters ---
   mbstd_group_size: 4

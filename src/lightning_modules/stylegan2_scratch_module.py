@@ -17,27 +17,17 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         self.save_hyperparameters()
 
         print("Initializing From-Scratch Generator...")
-        # CORRECTED: Instantiate Generator with the new, explicit signature
-        self.G = Generator(
-            z_dim=self.hparams.model_cfg.z_dim,
-            w_dim=self.hparams.model_cfg.w_dim,
-            num_mapping_layers=self.hparams.model_cfg.num_mapping_layers,
-            mapping_lr_mul=self.hparams.model_cfg.mapping_lr_mul,
-            img_resolution=self.hparams.model_cfg.img_resolution,
-            img_channels=self.hparams.model_cfg.img_channels,
-            channel_base=self.hparams.model_cfg.channel_base,
-            channel_max=self.hparams.model_cfg.channel_max,
-            resample_kernel=self.hparams.model_cfg.resample_kernel
-        )
+        # The Generator call is correct and matches the network definition.
+        self.G = Generator(**model_cfg)
 
         print("Initializing From-Scratch Discriminator...")
-        # CORRECTED: Instantiate Discriminator with the new, explicit signature
+        # CORRECTED: Removed the 'resample_kernel' argument, as the refactored
+        # Discriminator class in the network file no longer accepts it.
         self.D = Discriminator(
             img_resolution=self.hparams.model_cfg.img_resolution,
             img_channels=self.hparams.model_cfg.img_channels,
             channel_base=self.hparams.model_cfg.channel_base,
             channel_max=self.hparams.model_cfg.channel_max,
-            resample_kernel=self.hparams.model_cfg.resample_kernel,
             mbstd_group_size=self.hparams.model_cfg.mbstd_group_size
         )
 
@@ -46,7 +36,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         for param in self.G_ema.parameters():
             param.requires_grad = False
 
-        # ... (rest of the __init__ method is the same) ...
+        # ... (rest of the __init__ method is the same and correct) ...
         self.ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
         self.r1_gamma = self.hparams.training_cfg.get('r1_gamma', 10.0)
         self.d_reg_interval = self.hparams.training_cfg.get('d_reg_interval', 16)
@@ -81,7 +71,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         print("StyleGAN2ScratchLightningModule initialized.")
 
     def configure_optimizers(self):
-        # This method remains correct
+        # This method is correct
         g_params = list(self.G.parameters()) 
         d_params = list(self.D.parameters())
         g_lr = self.hparams.training_cfg.g_lr
@@ -92,7 +82,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return opt_g, opt_d
 
     def on_train_start(self):
-        # This method remains correct
+        # This method is correct
         if self.pl_weight > 0: self.pl_mean = self.pl_mean.to(self.device)
         if self.ada_enabled:
             self.ada_p = self.ada_p.to(self.device)
@@ -104,7 +94,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return self.G_ema(z, truncation_psi=truncation_psi, noise_mode=noise_mode, return_ws=return_ws)
 
     def training_step(self, batch, batch_idx):
-        # This method remains correct
+        # This method is correct
         opt_g, opt_d = self.optimizers() 
         real_images, _ = batch 
         current_batch_size = real_images.shape[0]
@@ -172,7 +162,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         self.log('progress/kimg', self.cur_nimg / 1000.0, on_step=True, rank_zero_only=True, batch_size=current_batch_size)
     
     def on_train_batch_end(self, outputs, batch: any, batch_idx: int) -> None:
-        # This method remains correct
+        # This method is correct
         if self.ada_enabled and self.cur_nimg >= self.last_ada_update_nimg + self.ada_interval:
             self.last_ada_update_nimg = self.cur_nimg
             adjustment = torch.sign(self.ada_stats - self.ada_target) * self.ada_adjust_speed
@@ -188,7 +178,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
 
     @torch.no_grad()
     def generate_and_log_samples(self):
-        # This method remains correct
+        # This method is correct
         if not self.trainer.is_global_zero: return
         if self.image_snapshot_dir is None and hasattr(self.logger, 'log_dir'):
             self.image_snapshot_dir = os.path.join(self.logger.log_dir, "image_snapshots")
