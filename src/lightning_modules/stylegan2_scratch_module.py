@@ -31,10 +31,29 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
 
         # --- Network Initialization ---
         print("Initializing From-Scratch Generator...")
-        self.G = Generator(**self.hparams.model_cfg)
+        # CORRECTED: Instantiate Generator with an explicit list of arguments
+        # from the model config to prevent TypeErrors. This is the definitive fix.
+        self.G = Generator(
+            z_dim=self.hparams.model_cfg.z_dim,
+            w_dim=self.hparams.model_cfg.w_dim,
+            num_mapping_layers=self.hparams.model_cfg.num_mapping_layers,
+            mapping_lr_mul=self.hparams.model_cfg.mapping_lr_mul,
+            img_resolution=self.hparams.model_cfg.img_resolution,
+            img_channels=self.hparams.model_cfg.img_channels,
+            channel_base=self.hparams.model_cfg.channel_base,
+            channel_max=self.hparams.model_cfg.channel_max
+        )
         
         print("Initializing From-Scratch Discriminator...")
-        self.D = Discriminator(**self.hparams.model_cfg)
+        # CORRECTED: Instantiate Discriminator with an explicit list of arguments
+        # from the model config to prevent TypeErrors. This is the definitive fix.
+        self.D = Discriminator(
+            img_resolution=self.hparams.model_cfg.img_resolution,
+            img_channels=self.hparams.model_cfg.img_channels,
+            channel_base=self.hparams.model_cfg.channel_base,
+            channel_max=self.hparams.model_cfg.channel_max,
+            mbstd_group_size=self.hparams.model_cfg.mbstd_group_size
+        )
 
         print("Initializing G_ema...")
         self.G_ema = copy.deepcopy(self.G).eval()
@@ -135,8 +154,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         opt_g.zero_grad(set_to_none=True)
         z_g = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         
-        # CORRECTED: Get style_mixing_prob from the config and pass it to the generator.
-        # This is the key change that enables the new regularization technique.
         style_mixing_prob = self.hparams.training_cfg.get('style_mixing_prob', 0.9)
         fake_images_g, ws_g = self.G(z_g, style_mixing_prob=style_mixing_prob, return_ws=True)
 
