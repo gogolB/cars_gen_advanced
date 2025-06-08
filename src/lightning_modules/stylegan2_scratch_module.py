@@ -88,6 +88,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         self.last_ada_update_nimg = 0
         self.automatic_optimization = False 
         self.image_snapshot_dir = None
+        self.last_snapshot_kimg = -1
         print("StyleGAN2ScratchLightningModule initialized.")
 
 
@@ -163,15 +164,12 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             path_lengths = calculate_path_lengths(ws_pl_broadcasted, self.G.synthesis)
             
             if not torch.isnan(path_lengths).any():
-                self.log('g_loss/raw_path_length', path_lengths.mean(), on_step=True, batch_size=current_batch_size)
                 pl_penalty = (path_lengths - self.pl_mean).square()
                 self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
                 pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
                 if not torch.isnan(pl_loss).any():
                     g_loss += pl_loss
                     self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
-            else:
-                 self.log('g_loss/path_length_nan_skipped', 1.0, on_step=True, batch_size=current_batch_size)
 
         self.manual_backward(g_loss)
         self.clip_gradients(opt_g, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
@@ -184,7 +182,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
             ema_nimg = ema_kimg * 1000
             beta = 0.5 ** ((current_batch_size * world_size) / max(ema_nimg, 1e-8))
-            for p_ema, p_main in zip(self.G.parameters(), self.G.parameters()):
+            for p_ema, p_main in zip(self.G_ema.parameters(), self.G.parameters()):
                 p_ema.copy_(p_main.lerp(p_ema, beta))
             for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
                 b_ema.copy_(b_main)
@@ -197,12 +195,16 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.ada_p.copy_((self.ada_p + adjustment).clamp(0.0, 1.0))
             self.log('ada/p', self.ada_p, on_step=True, rank_zero_only=True)
             self.log('ada/rt_stat', self.ada_stats, on_step=True, rank_zero_only=True)
+
         if self.trainer.is_global_zero:
+            kimg_now = self.cur_nimg // 1000
             kimg_per_tick = self.hparams.training_cfg.get('kimg_per_tick', 4)
             snapshot_ticks = self.hparams.training_cfg.get('snapshot_ticks', 10)
-            snapshot_interval_kimg = kimg_per_tick * snapshot_ticks
-            if snapshot_interval_kimg > 0 and (self.cur_nimg // 1000) > 0 and (self.cur_nimg // 1000) % snapshot_interval_kimg == 0 and batch_idx == 0:
+            snapshot_interval = kimg_per_tick * snapshot_ticks
+
+            if snapshot_interval > 0 and kimg_now >= self.last_snapshot_kimg + snapshot_interval:
                 self.generate_and_log_samples()
+                self.last_snapshot_kimg = kimg_now
 
     @torch.no_grad()
     def generate_and_log_samples(self):

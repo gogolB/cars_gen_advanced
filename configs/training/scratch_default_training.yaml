@@ -2,22 +2,26 @@
 
 # --- Custom Hyperparameters for the LightningModule ---
 total_kimg: 25000
+# CORRECTED: Set snapshot_ticks to 1 for much more frequent image snapshots.
 kimg_per_tick: 4
-snapshot_ticks: 2
+snapshot_ticks: 1 
 nimg_snapshot: 16
 
-# CORRECTED: Using differential learning rates to re-balance the training.
-# The discriminator's LR is now lower, giving the generator a chance to catch up.
 g_lr: 0.0002
 d_lr: 0.0001
 
 adam_betas: [0.0, 0.99]
-adam_eps: 1.0e-8
-r1_gamma: 5.0
+adam_eps: 1.0e-4 
+
+# CORRECTED: Decreased R1 gamma to slightly weaken the discriminator.
+r1_gamma: 2.0
 d_reg_interval: 16
-pl_weight: 2.0
+# CORRECTED: Significantly increased Path Length weight to more strongly
+# regularize the generator and discourage mode collapse.
+pl_weight: 10.0
 g_reg_interval: 4
 pl_decay: 0.01
+
 ema_kimg: 10.0
 ema_rampup_ratio: 0.05
 ema_beta: 0.999
