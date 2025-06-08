@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 import numpy as np
+import random
 
 # --- Custom Layers (Unchanged) ---
 
@@ -80,7 +81,7 @@ class PixelNorm(nn.Module):
 class ToRGBLayer(nn.Module):
     def __init__(self, in_channels, out_channels, style_dim):
         super().__init__()
-        self.conv = ModulatedConv2d(in_channels, out_channels, 1, style_dim, demodulate=False)
+        self.conv = ModulatedConv2d(in_channels, out_channels, 1, style_dim, demodulate=True)
 
     def forward(self, x, style):
         return self.conv(x, style)
@@ -90,6 +91,7 @@ class ToRGBLayer(nn.Module):
 class MappingNetwork(nn.Module):
     def __init__(self, z_dim, w_dim, num_layers, lr_mul=0.01):
         super().__init__()
+        self.w_dim = w_dim
         layers = [PixelNorm()]
         for i in range(num_layers):
             layers.append(EqualizedLinear(z_dim if i == 0 else w_dim, w_dim, lr_mul=lr_mul))
@@ -156,46 +158,14 @@ class SynthesisNetwork(nn.Module):
         x = self.conv1(x, ws[:, 0])
         x = self.noise_init(x)
         x = self.act_init(x)
+        
         rgb = self.to_rgb_init(x, ws[:, 0])
         
         for i, block in enumerate(self.blocks):
+            # Each block uses two styles from ws
             x, rgb = block(x, ws[:, i * 2 + 1], ws[:, i * 2 + 2], rgb)
         
         return rgb
-
-class DiscriminatorBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv1 = EqualizedConv2d(in_channels, out_channels, 3, padding=1)
-        self.act1 = nn.LeakyReLU(0.2)
-        self.conv2 = EqualizedConv2d(out_channels, out_channels, 3, padding=1)
-        self.act2 = nn.LeakyReLU(0.2)
-        self.downsample = nn.AvgPool2d(2)
-        self.skip = EqualizedConv2d(in_channels, out_channels, 1)
-
-    def forward(self, x):
-        skip_x = self.skip(self.downsample(x))
-        x = self.act1(self.conv1(x))
-        x = self.act2(self.conv2(x))
-        x = self.downsample(x)
-        return (x + skip_x) * (1 / math.sqrt(2))
-
-class MinibatchStdDevLayer(nn.Module):
-    def __init__(self, group_size=4):
-        super().__init__()
-        self.group_size = group_size
-
-    def forward(self, x):
-        N, C, H, W = x.shape
-        group_size = min(N, self.group_size)
-        y = x.view(group_size, -1, C, H, W)
-        y = y - y.mean(dim=0, keepdim=True)
-        # CORRECTED: Added a small epsilon (1e-8) before the sqrt to prevent
-        # taking the square root of a negative number due to floating point
-        # precision errors. This is the definitive fix for the 'PowBackward0' NaN error.
-        y = (y.square().mean(dim=0) + 1e-8).sqrt().mean(dim=[1,2,3])
-        y = y.view(-1, 1, 1, 1).repeat(group_size, 1, H, W)
-        return torch.cat([x, y], dim=1)
 
 class Discriminator(nn.Module):
     def __init__(self, img_resolution, img_channels, channel_base=32768, channel_max=512, mbstd_group_size=4):
@@ -242,12 +212,41 @@ class Generator(nn.Module):
                                           channel_base=channel_base, 
                                           channel_max=channel_max)
 
-    def forward(self, z, truncation_psi=0.7, noise_mode='random', return_ws=False):
+    # CORRECTED: The forward pass now implements style mixing regularization,
+    # a critical technique to prevent mode collapse.
+    def forward(self, z, style_mixing_prob=0.9, truncation_psi=0.7, return_ws=False):
+        # Map the primary latent codes to style vectors.
         w = self.mapping(z)
-        if truncation_psi < 1.0:
+        
+        # Perform style mixing.
+        if self.training and style_mixing_prob > 0 and random.random() < style_mixing_prob:
+            # Generate a second set of latents and style vectors.
+            z2 = torch.randn_like(z)
+            w2 = self.mapping(z2)
+            
+            # Choose a random crossover point for each sample in the batch.
+            # This is more efficient than a single crossover for the whole batch.
+            num_layers = self.num_ws
+            crossover_points = (torch.rand(z.shape[0], device=z.device) * num_layers).floor().to(torch.long)
+            
+            # Create a mask to select styles from w or w2.
+            mask = torch.arange(num_layers, device=z.device)[None, :] < crossover_points[:, None]
+            
+            # Broadcast w and w2 for selection.
+            ws = torch.where(mask[:, :, None], w.unsqueeze(1), w2.unsqueeze(1))
+        else:
+            # If not mixing, use the primary style vector for all layers.
+            ws = w.unsqueeze(1).repeat(1, self.num_ws, 1)
+
+        # Apply truncation if not training.
+        if not self.training and truncation_psi < 1.0:
+            # This would require a pre-calculated average w (w_avg)
+            # w_avg = self.w_avg.lerp(w, truncation_psi) # Psuedocode
+            # ws = w_avg.unsqueeze(1).repeat(1, self.num_ws, 1)
             pass
-        ws = w.unsqueeze(1).repeat(1, self.num_ws, 1)
+
         img = self.synthesis(ws)
+        
         if return_ws:
             return img, ws
         return img

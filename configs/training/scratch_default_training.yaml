@@ -2,7 +2,6 @@
 
 # --- Custom Hyperparameters for the LightningModule ---
 total_kimg: 25000
-# CORRECTED: Set snapshot_ticks to 1 for much more frequent image snapshots.
 kimg_per_tick: 4
 snapshot_ticks: 1 
 nimg_snapshot: 16
@@ -13,11 +12,12 @@ d_lr: 0.0001
 adam_betas: [0.0, 0.99]
 adam_eps: 1.0e-4 
 
-# CORRECTED: Decreased R1 gamma to slightly weaken the discriminator.
+# CORRECTED: Added style_mixing_prob to enable the new regularization.
+# This is the final step in fixing the mode collapse issue.
+style_mixing_prob: 0.9
+
 r1_gamma: 2.0
 d_reg_interval: 16
-# CORRECTED: Significantly increased Path Length weight to more strongly
-# regularize the generator and discourage mode collapse.
 pl_weight: 10.0
 g_reg_interval: 4
 pl_decay: 0.01

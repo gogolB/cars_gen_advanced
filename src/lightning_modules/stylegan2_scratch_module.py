@@ -31,29 +31,10 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
 
         # --- Network Initialization ---
         print("Initializing From-Scratch Generator...")
-        # CORRECTED: Instantiate Generator with an explicit list of arguments
-        # from the model config to prevent TypeErrors. This is the definitive fix.
-        self.G = Generator(
-            z_dim=self.hparams.model_cfg.z_dim,
-            w_dim=self.hparams.model_cfg.w_dim,
-            num_mapping_layers=self.hparams.model_cfg.num_mapping_layers,
-            mapping_lr_mul=self.hparams.model_cfg.mapping_lr_mul,
-            img_resolution=self.hparams.model_cfg.img_resolution,
-            img_channels=self.hparams.model_cfg.img_channels,
-            channel_base=self.hparams.model_cfg.channel_base,
-            channel_max=self.hparams.model_cfg.channel_max
-        )
+        self.G = Generator(**self.hparams.model_cfg)
         
         print("Initializing From-Scratch Discriminator...")
-        # CORRECTED: Instantiate Discriminator with an explicit list of arguments
-        # from the model config to prevent TypeErrors. This is the definitive fix.
-        self.D = Discriminator(
-            img_resolution=self.hparams.model_cfg.img_resolution,
-            img_channels=self.hparams.model_cfg.img_channels,
-            channel_base=self.hparams.model_cfg.channel_base,
-            channel_max=self.hparams.model_cfg.channel_max,
-            mbstd_group_size=self.hparams.model_cfg.mbstd_group_size
-        )
+        self.D = Discriminator(**self.hparams.model_cfg)
 
         print("Initializing G_ema...")
         self.G_ema = copy.deepcopy(self.G).eval()
@@ -98,8 +79,8 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         g_lr = self.hparams.training_cfg.g_lr
         d_lr = self.hparams.training_cfg.d_lr
         adam_betas = tuple(self.hparams.training_cfg.adam_betas) 
-        opt_g = torch.optim.Adam(g_params, lr=g_lr, betas=adam_betas)
-        opt_d = torch.optim.Adam(d_params, lr=d_lr, betas=adam_betas)
+        opt_g = torch.optim.Adam(g_params, lr=g_lr, betas=adam_betas, eps=self.hparams.training_cfg.adam_eps)
+        opt_d = torch.optim.Adam(d_params, lr=d_lr, betas=adam_betas, eps=self.hparams.training_cfg.adam_eps)
         return opt_g, opt_d
 
     def on_train_start(self):
@@ -112,7 +93,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             self.augment_pipe = self.augment_pipe.to(self.device)
 
     def forward(self, z, truncation_psi=0.7, noise_mode='random', return_ws=False):
-        return self.G_ema(z, truncation_psi=truncation_psi, noise_mode=noise_mode, return_ws=return_ws)
+        return self.G_ema(z, truncation_psi=truncation_psi, return_ws=return_ws)
 
     def training_step(self, batch, batch_idx):
         opt_g, opt_d = self.optimizers() 
@@ -126,7 +107,8 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         opt_d.zero_grad(set_to_none=True)
         z_d = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         with torch.no_grad():
-            fake_images_d = self.G(z_d)
+            # Generate fakes for D without style mixing
+            fake_images_d = self.G(z_d, style_mixing_prob=0.0) 
         real_images_aug = self.augment_pipe(real_images, p=current_p) if self.augment_pipe else real_images
         fake_images_aug = self.augment_pipe(fake_images_d, p=current_p) if self.augment_pipe else fake_images_d
         d_real_logits = self.D(real_images_aug)
@@ -144,14 +126,20 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
                 self.log('d_loss/r1', r1_penalty, on_step=True, batch_size=current_batch_size)
         
         self.manual_backward(d_loss)
-        self.clip_gradients(opt_d, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
+        if self.hparams.training_cfg.get('gradient_clip_val', 0) > 0:
+            self.clip_gradients(opt_d, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
         opt_d.step()
         
         # --- G loss ---
         self.G.requires_grad_(True); self.D.requires_grad_(False)
         opt_g.zero_grad(set_to_none=True)
         z_g = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
-        fake_images_g, ws_g = self.G(z_g, return_ws=True)
+        
+        # CORRECTED: Get style_mixing_prob from the config and pass it to the generator.
+        # This is the key change that enables the new regularization technique.
+        style_mixing_prob = self.hparams.training_cfg.get('style_mixing_prob', 0.9)
+        fake_images_g, ws_g = self.G(z_g, style_mixing_prob=style_mixing_prob, return_ws=True)
+
         fake_images_g_aug = self.augment_pipe(fake_images_g, p=current_p) if self.augment_pipe else fake_images_g
         d_fake_logits_g = self.D(fake_images_g_aug)
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
@@ -159,9 +147,9 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         
         if self.pl_weight > 0 and (batch_idx % self.g_reg_interval == 0):
             pl_z = torch.randn(current_batch_size // 2, self.G.z_dim, device=self.device)
-            ws_pl_single = self.G.mapping(pl_z)
-            ws_pl_broadcasted = ws_pl_single.unsqueeze(1).repeat(1, self.G.num_ws, 1)
-            path_lengths = calculate_path_lengths(ws_pl_broadcasted, self.G.synthesis)
+            # Generate with no style mixing for PL calculation
+            _, ws_pl = self.G(pl_z, style_mixing_prob=0.0, return_ws=True)
+            path_lengths = calculate_path_lengths(ws_pl, self.G.synthesis)
             
             if not torch.isnan(path_lengths).any():
                 pl_penalty = (path_lengths - self.pl_mean).square()
@@ -172,7 +160,8 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
                     self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
 
         self.manual_backward(g_loss)
-        self.clip_gradients(opt_g, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
+        if self.hparams.training_cfg.get('gradient_clip_val', 0) > 0:
+            self.clip_gradients(opt_g, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
         opt_g.step()
 
         # --- EMA Update ---
