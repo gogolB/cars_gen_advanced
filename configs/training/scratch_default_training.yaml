@@ -6,19 +6,19 @@ kimg_per_tick: 4
 snapshot_ticks: 1 
 nimg_snapshot: 16
 
-g_lr: 0.0002
-d_lr: 0.0001
+g_lr: 0.0025
+d_lr: 0.0025
 
 adam_betas: [0.0, 0.99]
-adam_eps: 1.0e-4 
+adam_eps: 1.0e-8 
 
 # CORRECTED: Added style_mixing_prob to enable the new regularization.
 # This is the final step in fixing the mode collapse issue.
 style_mixing_prob: 0.9
 
-r1_gamma: 2.0
+r1_gamma: 10.0
 d_reg_interval: 16
-pl_weight: 10.0
+pl_weight: 2.0
 g_reg_interval: 4
 pl_decay: 0.01
 

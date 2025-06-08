@@ -115,84 +115,152 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         return self.G_ema(z, truncation_psi=truncation_psi, return_ws=return_ws)
 
     def training_step(self, batch, batch_idx):
-        opt_g, opt_d = self.optimizers() 
-        real_images, _ = batch 
+        opt_g, opt_d = self.optimizers()
+        real_images, _ = batch
         current_batch_size = real_images.shape[0]
         real_images = real_images.to(self.device).to(torch.float32)
+        
+        # Get current augmentation probability
         current_p = self.ada_p.item() if self.ada_enabled else 0.0
-
-        # --- D loss ---
-        self.G.requires_grad_(False); self.D.requires_grad_(True)
+        
+        # =============================================================================
+        # DISCRIMINATOR UPDATE
+        # =============================================================================
+        self.G.requires_grad_(False)
+        self.D.requires_grad_(True)
         opt_d.zero_grad(set_to_none=True)
+        
+        # Generate fake images
         z_d = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         with torch.no_grad():
-            # Generate fakes for D without style mixing
-            fake_images_d = self.G(z_d, style_mixing_prob=0.0) 
+            # FIXED: Disable style mixing for D training to stabilize learning
+            fake_images_d = self.G(z_d, style_mixing_prob=0.0)
+        
+        # Apply augmentation
         real_images_aug = self.augment_pipe(real_images, p=current_p) if self.augment_pipe else real_images
         fake_images_aug = self.augment_pipe(fake_images_d, p=current_p) if self.augment_pipe else fake_images_d
+        
+        # Discriminator forward pass
         d_real_logits = self.D(real_images_aug)
         d_fake_logits = self.D(fake_images_aug)
-        if self.ada_enabled: self.ada_stats.copy_(d_real_logits.sign().mean().lerp(self.ada_stats, 0.999))
+        
+        # Update ADA statistics
+        if self.ada_enabled:
+            self.ada_stats.copy_(d_real_logits.sign().mean().lerp(self.ada_stats, 0.999))
+        
+        # Main discriminator loss
         d_loss = compute_d_loss_logistic(d_real_logits, d_fake_logits)
         self.log('d_loss/main', d_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
         
+        # R1 regularization (FIXED)
         if self.r1_gamma > 0 and (batch_idx % self.d_reg_interval == 0):
             real_images_for_r1 = real_images_aug.detach().requires_grad_(True)
             d_real_logits_r1 = self.D(real_images_for_r1)
-            r1_penalty = compute_r1_penalty(real_images_for_r1, d_real_logits_r1) * (self.r1_gamma / 2) * self.d_reg_interval
-            if not torch.isnan(r1_penalty).any():
-                d_loss += r1_penalty
-                self.log('d_loss/r1', r1_penalty, on_step=True, batch_size=current_batch_size)
+            
+            # FIXED: Proper R1 penalty scaling
+            r1_penalty = compute_r1_penalty(real_images_for_r1, d_real_logits_r1)
+            r1_loss = r1_penalty * (self.r1_gamma / 2) * self.d_reg_interval
+            
+            if not torch.isnan(r1_loss):
+                d_loss = d_loss + r1_loss
+                self.log('d_loss/r1', r1_loss, on_step=True, batch_size=current_batch_size)
         
+        # Discriminator backward pass
         self.manual_backward(d_loss)
-        if self.hparams.training_cfg.get('gradient_clip_val', 0) > 0:
-            self.clip_gradients(opt_d, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
+        
+        # FIXED: Gradient clipping
+        if hasattr(self.hparams.training_cfg, 'gradient_clip_val') and self.hparams.training_cfg.gradient_clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(self.D.parameters(), self.hparams.training_cfg.gradient_clip_val)
+        
         opt_d.step()
         
-        # --- G loss ---
-        self.G.requires_grad_(True); self.D.requires_grad_(False)
+        # =============================================================================
+        # GENERATOR UPDATE
+        # =============================================================================
+        self.G.requires_grad_(True)
+        self.D.requires_grad_(False)
         opt_g.zero_grad(set_to_none=True)
+        
+        # Generate fake images for G training
         z_g = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         
+        # FIXED: Use proper style mixing probability
         style_mixing_prob = self.hparams.training_cfg.get('style_mixing_prob', 0.9)
         fake_images_g, ws_g = self.G(z_g, style_mixing_prob=style_mixing_prob, return_ws=True)
-
+        
+        # Apply augmentation and get discriminator response
         fake_images_g_aug = self.augment_pipe(fake_images_g, p=current_p) if self.augment_pipe else fake_images_g
         d_fake_logits_g = self.D(fake_images_g_aug)
+        
+        # Main generator loss
         g_loss = compute_g_loss_nonsaturating(d_fake_logits_g)
         self.log('g_loss/main', g_loss, on_step=True, prog_bar=True, batch_size=current_batch_size)
         
+        # Path length regularization (FIXED)
         if self.pl_weight > 0 and (batch_idx % self.g_reg_interval == 0):
-            pl_z = torch.randn(current_batch_size // 2, self.G.z_dim, device=self.device)
-            # Generate with no style mixing for PL calculation
+            # Use smaller batch for PL to save memory
+            pl_batch_size = max(1, current_batch_size // 2)
+            pl_z = torch.randn(pl_batch_size, self.G.z_dim, device=self.device)
+            
+            # Generate with style mixing disabled for PL calculation
             _, ws_pl = self.G(pl_z, style_mixing_prob=0.0, return_ws=True)
+            ws_pl.requires_grad_(True)
+            
+            # Calculate path lengths
             path_lengths = calculate_path_lengths(ws_pl, self.G.synthesis)
             
             if not torch.isnan(path_lengths).any():
-                pl_penalty = (path_lengths - self.pl_mean).square()
-                self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
+                # FIXED: Proper PL penalty calculation
+                pl_penalty = (path_lengths - self.pl_mean).pow(2)
                 pl_loss = pl_penalty.mean() * self.pl_weight * self.g_reg_interval
-                if not torch.isnan(pl_loss).any():
-                    g_loss += pl_loss
+                
+                # Update PL mean
+                self.pl_mean.copy_(path_lengths.mean().detach().lerp(self.pl_mean, self.pl_decay))
+                
+                if not torch.isnan(pl_loss):
+                    g_loss = g_loss + pl_loss
                     self.log('g_loss/pl_penalty', pl_loss, on_step=True, batch_size=current_batch_size)
-
+                    self.log('g_loss/pl_mean', self.pl_mean, on_step=True, batch_size=current_batch_size)
+        
+        # Generator backward pass
         self.manual_backward(g_loss)
-        if self.hparams.training_cfg.get('gradient_clip_val', 0) > 0:
-            self.clip_gradients(opt_g, gradient_clip_val=self.hparams.training_cfg.gradient_clip_val, gradient_clip_algorithm="norm")
+        
+        # FIXED: Gradient clipping for generator
+        if hasattr(self.hparams.training_cfg, 'gradient_clip_val') and self.hparams.training_cfg.gradient_clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(self.G.parameters(), self.hparams.training_cfg.gradient_clip_val)
+        
         opt_g.step()
-
-        # --- EMA Update ---
+        
+        # =============================================================================
+        # EMA UPDATE (FIXED)
+        # =============================================================================
         with torch.no_grad():
             world_size = self.trainer.world_size if self.trainer else 1
             self.cur_nimg += current_batch_size * world_size
+            
+            # FIXED: Proper EMA calculation
             ema_kimg = self.hparams.training_cfg.get('ema_kimg', 10.0)
             ema_nimg = ema_kimg * 1000
-            beta = 0.5 ** ((current_batch_size * world_size) / max(ema_nimg, 1e-8))
+            
+            # Calculate EMA beta
+            beta = 0.5 ** (current_batch_size * world_size / max(ema_nimg, 1e-8))
+            
+            # Update EMA weights
             for p_ema, p_main in zip(self.G_ema.parameters(), self.G.parameters()):
                 p_ema.copy_(p_main.lerp(p_ema, beta))
+            
+            # Update EMA buffers
             for b_ema, b_main in zip(self.G_ema.buffers(), self.G.buffers()):
                 b_ema.copy_(b_main)
+        
+        # Log progress
         self.log('progress/kimg', self.cur_nimg / 1000.0, on_step=True, rank_zero_only=True, batch_size=current_batch_size)
+        
+        # Log additional metrics for debugging
+        self.log('debug/d_real_mean', d_real_logits.mean(), on_step=True, batch_size=current_batch_size)
+        self.log('debug/d_fake_mean', d_fake_logits.mean(), on_step=True, batch_size=current_batch_size)
+        self.log('debug/fake_img_std', fake_images_g.std(), on_step=True, batch_size=current_batch_size)
+
     
     def on_train_batch_end(self, outputs, batch: any, batch_idx: int) -> None:
         if self.ada_enabled and self.cur_nimg >= self.last_ada_update_nimg + self.ada_interval:

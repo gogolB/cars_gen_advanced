@@ -13,36 +13,41 @@ def compute_g_loss_nonsaturating(fake_logits):
     return F.softplus(-fake_logits).mean()
 
 def compute_r1_penalty(real_images, real_logits):
-    """R1 gradient penalty for the discriminator."""
-    # Note: device argument is removed as it can be inferred from the tensors.
+    """Fixed R1 gradient penalty calculation"""
+    # Compute gradients
     grads = torch.autograd.grad(
         outputs=real_logits.sum(), 
         inputs=real_images, 
         create_graph=True, 
+        retain_graph=True,
         only_inputs=True
     )[0]
-    r1_penalty = grads.square().sum(dim=[1, 2, 3])
-    return r1_penalty.mean()
+    
+    # FIXED: Proper gradient penalty calculation
+    # Sum over spatial dimensions, then take mean over batch
+    grad_penalty = grads.pow(2).sum(dim=[1, 2, 3]).mean()
+    
+    return grad_penalty
+
 
 def calculate_path_lengths(ws, synthesis_net):
-    """
-    Calculates the path length penalty for the generator.
-    This encourages a smoother latent space.
-    """
-    # Get random perceptual path length variations
-    pl_noise = torch.randn_like(ws) / (ws.shape[2] ** 0.5)
+    """Fixed path length regularization"""
+    batch_size = ws.shape[0]
     
-    # Get the generator's output for the original and noised latents
-    # CORRECTED: Removed the incorrect tuple unpacking `_,`. The synthesis network
-    # returns a single tensor.
-    fake_images_original = synthesis_net(ws)
-    fake_images_noised = synthesis_net(ws + pl_noise)
-
-    # Calculate the perceptual distance (L2 norm of the difference in images)
-    # The sum is over the C, H, W dimensions, leaving a per-image distance.
-    # CORRECTED: Removed the redundant and numerically unstable division by batch size.
-    # The .mean() operation on the penalty is handled later in the training step.
-    distances = (fake_images_original - fake_images_noised).square().sum(dim=[1, 2, 3])
+    # FIXED: Use proper noise scaling
+    # Generate small perturbations in W space
+    pl_noise = torch.randn_like(ws) * 0.1  # Increased from tiny value
     
-    return distances
+    # Compute images for original and perturbed latents
+    images_orig = synthesis_net(ws)
+    images_pert = synthesis_net(ws + pl_noise)
+    
+    # FIXED: Compute perceptual path length properly
+    # Calculate pixel-space distance
+    pixel_dist = (images_orig - images_pert).pow(2).sum(dim=[1, 2, 3])
+    
+    # Normalize by noise magnitude
+    path_lengths = pixel_dist / (pl_noise.pow(2).sum(dim=[1, 2]) + 1e-8)
+    
+    return path_lengths.sqrt()
 

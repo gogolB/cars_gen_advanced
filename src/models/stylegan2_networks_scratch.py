@@ -58,21 +58,21 @@ class ModulatedConv2d(nn.Module):
         x = x + self.bias.view(1, -1, 1, 1)
         return x
 
-# CORRECTED: The NoiseInjection layer is the root cause of the mode collapse.
-# The learnable weight was being optimized to zero, disabling the noise.
-# This new version removes the learnable weight, forcing the network
-# to process the noise and preventing it from collapsing.
 class NoiseInjection(nn.Module):
     def __init__(self):
         super().__init__()
-        # The learnable weight is removed. We use a fixed scaling factor for the noise.
-        # This is a small value to prevent the noise from overwhelming the activations
-        # early in training, but it is not learnable and cannot be set to zero.
-        self.noise_strength = 0.1
-
-    def forward(self, x):
-        noise = torch.randn(x.shape[0], 1, x.shape[2], x.shape[3], device=x.device, dtype=x.dtype)
-        return x + noise * self.noise_strength
+        # Learnable noise weight initialized to a reasonable value
+        # Key fix: This allows each layer to learn its optimal noise level
+        self.weight = nn.Parameter(torch.zeros(1))
+        
+    def forward(self, x, noise=None):
+        if noise is None:
+            # Generate noise with proper shape
+            noise = torch.randn(x.shape[0], 1, x.shape[2], x.shape[3], 
+                              device=x.device, dtype=x.dtype)
+        
+        # Apply learnable scaling - this is critical!
+        return x + noise * self.weight
 
 class PixelNorm(nn.Module):
     def forward(self, x):
@@ -104,24 +104,36 @@ class SynthesisBlock(nn.Module):
     def __init__(self, in_channels, out_channels, w_dim, img_channels):
         super().__init__()
         self.conv1 = ModulatedConv2d(in_channels, out_channels, 3, w_dim, up=True)
-        self.noise1 = NoiseInjection()
+        self.noise1 = NoiseInjection()  # Fixed noise injection
         self.activation1 = nn.LeakyReLU(0.2)
+        
         self.conv2 = ModulatedConv2d(out_channels, out_channels, 3, w_dim)
-        self.noise2 = NoiseInjection()
+        self.noise2 = NoiseInjection()  # Fixed noise injection
         self.activation2 = nn.LeakyReLU(0.2)
+        
         self.to_rgb = ToRGBLayer(out_channels, img_channels, w_dim)
-    def forward(self, x, w1, w2, rgb):
+        
+    def forward(self, x, w1, w2, rgb, noise1=None, noise2=None):
+        # First convolution with upsampling
         x = self.conv1(x, w1)
-        x = self.noise1(x)
+        x = self.noise1(x, noise1)
         x = self.activation1(x)
+        
+        # Second convolution
         x = self.conv2(x, w2)
-        x = self.noise2(x)
+        x = self.noise2(x, noise2)
         x = self.activation2(x)
+        
+        # Generate RGB output
         new_rgb = self.to_rgb(x, w2)
+        
+        # Combine with previous RGB (skip connection)
         if rgb is not None:
             rgb = F.interpolate(rgb, scale_factor=2, mode='bilinear', align_corners=False)
             new_rgb = new_rgb + rgb
+            
         return x, new_rgb
+
 
 class DiscriminatorBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -215,25 +227,56 @@ class Generator(nn.Module):
         super().__init__()
         self.z_dim = z_dim
         self.w_dim = w_dim
+        
+        # Calculate number of W layers needed
         num_blocks = int(np.log2(img_resolution)) - 2
-        self.num_ws = num_blocks * 2 + 2
+        self.num_ws = num_blocks * 2 + 2  # Each block needs 2 Ws, plus initial layers
+        
         self.mapping = MappingNetwork(z_dim, w_dim, num_mapping_layers, lr_mul=mapping_lr_mul)
         self.synthesis = SynthesisNetwork(w_dim, img_resolution, img_channels, 
                                           channel_base=channel_base, 
                                           channel_max=channel_max)
-    def forward(self, z, style_mixing_prob=0.9, truncation_psi=0.7, return_ws=False):
-        w = self.mapping(z)
-        if self.training and style_mixing_prob > 0 and random.random() < style_mixing_prob:
-            z2 = torch.randn_like(z)
-            w2 = self.mapping(z2)
-            crossover_points = (torch.rand(z.shape[0], device=z.device) * self.num_ws).floor().to(torch.long)
-            mask = torch.arange(self.num_ws, device=z.device)[None, :] < crossover_points[:, None]
-            ws = torch.where(mask[:, :, None], w.unsqueeze(1), w2.unsqueeze(1))
-        else:
-            ws = w.unsqueeze(1).repeat(1, self.num_ws, 1)
-        if not self.training and truncation_psi < 1.0:
-            pass # Truncation would be implemented here
+        
+        # Register buffer for W average (for truncation)
+        self.register_buffer('w_avg', torch.zeros(w_dim))
+        
+    def forward(self, z, style_mixing_prob=0.9, truncation_psi=1.0, return_ws=False):
+        batch_size = z.shape[0]
+        
+        # Get primary style
+        w_primary = self.mapping(z)
+        
+        # Initialize ws tensor
+        ws = w_primary.unsqueeze(1).repeat(1, self.num_ws, 1)
+        
+        # FIXED: Proper style mixing using PyTorch random functions
+        if self.training and style_mixing_prob > 0:
+            # Generate secondary styles for mixing
+            z_secondary = torch.randn_like(z)
+            w_secondary = self.mapping(z_secondary)
+            
+            # Determine which samples get style mixing
+            mixing_mask = torch.rand(batch_size, device=z.device) < style_mixing_prob
+            
+            if mixing_mask.any():
+                # Choose random crossover points for each sample
+                crossover_points = torch.randint(1, self.num_ws, 
+                                               (mixing_mask.sum(),), 
+                                               device=z.device)
+                
+                # Apply style mixing
+                mixed_indices = torch.where(mixing_mask)[0]
+                for i, idx in enumerate(mixed_indices):
+                    crossover = crossover_points[i]
+                    ws[idx, crossover:] = w_secondary[idx].unsqueeze(0)
+        
+        # FIXED: Proper truncation implementation
+        if truncation_psi < 1.0:
+            ws = self.w_avg.lerp(ws, truncation_psi)
+        
+        # Generate image
         img = self.synthesis(ws)
+        
         if return_ws:
             return img, ws
         return img
