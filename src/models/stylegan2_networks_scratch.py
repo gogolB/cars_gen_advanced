@@ -58,13 +58,21 @@ class ModulatedConv2d(nn.Module):
         x = x + self.bias.view(1, -1, 1, 1)
         return x
 
+# CORRECTED: The NoiseInjection layer is the root cause of the mode collapse.
+# The learnable weight was being optimized to zero, disabling the noise.
+# This new version removes the learnable weight, forcing the network
+# to process the noise and preventing it from collapsing.
 class NoiseInjection(nn.Module):
     def __init__(self):
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(1))
+        # The learnable weight is removed. We use a fixed scaling factor for the noise.
+        # This is a small value to prevent the noise from overwhelming the activations
+        # early in training, but it is not learnable and cannot be set to zero.
+        self.noise_strength = 0.1
+
     def forward(self, x):
         noise = torch.randn(x.shape[0], 1, x.shape[2], x.shape[3], device=x.device, dtype=x.dtype)
-        return x + self.weight * noise
+        return x + noise * self.noise_strength
 
 class PixelNorm(nn.Module):
     def forward(self, x):
@@ -92,7 +100,6 @@ class MinibatchStdDevLayer(nn.Module):
 
 # --- Main Network Blocks (Order Corrected) ---
 
-# CORRECTED: Moved the Block definitions before the main networks that use them.
 class SynthesisBlock(nn.Module):
     def __init__(self, in_channels, out_channels, w_dim, img_channels):
         super().__init__()
