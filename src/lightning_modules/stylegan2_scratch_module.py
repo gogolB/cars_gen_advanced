@@ -134,7 +134,7 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         z_d = torch.randn(current_batch_size, self.G.z_dim, device=self.device)
         with torch.no_grad():
             # FIXED: Disable style mixing for D training to stabilize learning
-            fake_images_d = self.G(z_d, style_mixing_prob=0.0)
+            fake_images_d = self.G(z_d, style_mixing_prob=self.hparams.training_cfg.style_mixing_prob)
         
         # Apply augmentation
         real_images_aug = self.augment_pipe(real_images, p=current_p) if self.augment_pipe else real_images
@@ -187,6 +187,15 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
         # FIXED: Use proper style mixing probability
         style_mixing_prob = self.hparams.training_cfg.get('style_mixing_prob', 0.9)
         fake_images_g, ws_g = self.G(z_g, style_mixing_prob=style_mixing_prob, return_ws=True)
+        
+        with torch.no_grad():
+            # Log W-space diversity
+            _, ws = self.G(z_g, return_ws=True)
+            self.log('debug/w_std', ws.std(), on_step=True)
+            
+            # Log feature diversity (using discriminator features)
+            d_features = self.D(fake_images_g, return_features=True)  # Requires D modification
+            self.log('debug/feature_std', d_features.std(), on_step=True)
         
         # Apply augmentation and get discriminator response
         fake_images_g_aug = self.augment_pipe(fake_images_g, p=current_p) if self.augment_pipe else fake_images_g

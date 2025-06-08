@@ -6,12 +6,12 @@ model_cfg:
   # --- Generator Parameters ---
   z_dim: 512
   w_dim: 512
-  num_mapping_layers: 8
+  num_mapping_layers: 4
   mapping_lr_mul: 0.01
 
   # --- Synthesis Network Parameters ---
-  channel_base: 16384
-  channel_max: 512
+  channel_base: 8192
+  channel_max: 256
   # CORRECTED: Removed resample_kernel as it's no longer used in the refactored networks.
 
   # --- Discriminator Parameters ---

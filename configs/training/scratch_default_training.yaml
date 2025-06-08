@@ -16,7 +16,7 @@ adam_eps: 1.0e-8
 # This is the final step in fixing the mode collapse issue.
 style_mixing_prob: 0.9
 
-r1_gamma: 10.0
+r1_gamma: 50.0
 d_reg_interval: 16
 pl_weight: 2.0
 g_reg_interval: 4
@@ -27,7 +27,7 @@ ema_rampup_ratio: 0.05
 ema_beta: 0.999
 gradient_clip_val: 1.0 
 ada_kwargs:
-  target_rt: 0.6
+  target_rt: 0.8
   interval_kimg: 4
   speed_kimg: 500
 

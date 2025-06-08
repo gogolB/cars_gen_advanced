@@ -36,7 +36,8 @@ def calculate_path_lengths(ws, synthesis_net):
     
     # FIXED: Use proper noise scaling
     # Generate small perturbations in W space
-    pl_noise = torch.randn_like(ws) * 0.1  # Increased from tiny value
+    noise_std = ws.std() * 0.1  # 10% of W's standard deviation
+    pl_noise = torch.randn_like(ws) * noise_std
     
     # Compute images for original and perturbed latents
     images_orig = synthesis_net(ws)
