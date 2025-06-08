@@ -192,10 +192,6 @@ class StyleGAN2ScratchLightningModule(pl.LightningModule):
             # Log W-space diversity
             _, ws = self.G(z_g, return_ws=True)
             self.log('debug/w_std', ws.std(), on_step=True)
-            
-            # Log feature diversity (using discriminator features)
-            d_features = self.D(fake_images_g, return_features=True)  # Requires D modification
-            self.log('debug/feature_std', d_features.std(), on_step=True)
         
         # Apply augmentation and get discriminator response
         fake_images_g_aug = self.augment_pipe(fake_images_g, p=current_p) if self.augment_pipe else fake_images_g

@@ -6,8 +6,8 @@ kimg_per_tick: 4
 snapshot_ticks: 1 
 nimg_snapshot: 16
 
-g_lr: 0.0025
-d_lr: 0.0025
+g_lr: 0.001
+d_lr: 0.001
 
 adam_betas: [0.0, 0.99]
 adam_eps: 1.0e-8 
