@@ -1,7 +1,7 @@
 # configs/training/scratch_default_training.yaml
 
 # --- Custom Hyperparameters for the LightningModule ---
-total_kimg: 25000
+total_kimg: 5000
 kimg_per_tick: 4
 snapshot_ticks: 1 
 nimg_snapshot: 16
